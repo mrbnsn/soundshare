@@ -363,6 +363,16 @@ function stopPlayback() {
   if (window.__ytSeekInterval) { clearInterval(window.__ytSeekInterval); window.__ytSeekInterval = null; }
 }
 
+function resetSeekBar() {
+  const seekBar = window.__seekBar || document.getElementById('seek-bar');
+  const seekTime = window.__seekTimeEl || document.getElementById('seek-time');
+  const seekRow = document.getElementById('seek-row');
+  if (seekBar) seekBar.value = 0;
+  if (seekTime) seekTime.textContent = '0:00 / 0:00';
+  if (seekRow) seekRow.hidden = true;
+  window.__durationMs = 0;
+}
+
 function handleRemotePlay(data) {
   const { type, url, positionMs = 0, atTimestamp, username: who, queue: queueFromServer, name } = data || {};
   if (!url) return;
@@ -374,6 +384,7 @@ function handleRemotePlay(data) {
 
   window.__currentSharer = who || null;
   stopPlayback();
+  resetSeekBar();
   setNowPlaying(who || 'someone', name || trackName(url));
   window.__currentTrack = { type, url };
 
