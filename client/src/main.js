@@ -14,6 +14,11 @@ window.__queue = [];
 window.__history = [];
 window.__chatMessages = [];
 
+let currentRoomLabel = 'lobby';
+let chatUnread = 0;
+let lastTypingEmit = 0;
+let typingTimeouts = {};
+
 // ─── Utilities ───
 
 function escapeHtml(s) {
@@ -69,6 +74,75 @@ function showToast(message, type = 'info', duration = 3000) {
     toast.addEventListener('transitionend', () => toast.remove(), { once: true });
     setTimeout(() => toast.remove(), 500);
   }, duration);
+}
+
+// ─── URL type detection ───
+
+function detectUrlType(url) {
+  if (!url) return '';
+  try {
+    const u = new URL(url, window.location.origin);
+    if (u.hostname === 'soundcloud.com' || u.hostname === 'www.soundcloud.com') return 'SoundCloud';
+    if (/^(www\.)?(youtube\.com|youtu\.be)$/.test(u.hostname)) return 'YouTube';
+    if (u.hostname === 'drive.google.com') return 'Drive';
+    if (/\.(mp3|wav|ogg|flac|aac|m4a|webm)$/i.test(u.pathname)) return 'Audio';
+  } catch { /* noop */ }
+  return url.length > 5 ? 'Link' : '';
+}
+
+function updateUrlBadge() {
+  const badge = document.getElementById('url-type-badge');
+  const input = document.getElementById('audio-url');
+  if (!badge || !input) return;
+  const type = detectUrlType(input.value.trim());
+  badge.textContent = type;
+  badge.className = 'url-type-badge' + (type ? ` url-badge-${type.toLowerCase()}` : '');
+}
+
+// ─── Favicon ───
+
+const FAVICON_PLAYING = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><circle cx="16" cy="16" r="14" fill="%236ee7b7"/><polygon points="12,9 25,16 12,23" fill="%231a1a2e"/></svg>';
+const FAVICON_IDLE = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><circle cx="16" cy="16" r="14" fill="%23555"/><polygon points="12,9 25,16 12,23" fill="%23333"/></svg>';
+
+function updateFavicon(playing) {
+  let link = document.querySelector('link[rel="icon"]');
+  if (!link) {
+    link = document.createElement('link');
+    link.rel = 'icon';
+    document.head.appendChild(link);
+  }
+  link.href = playing ? FAVICON_PLAYING : FAVICON_IDLE;
+}
+
+// ─── Progress bar ───
+
+function updateProgressBar(percent) {
+  const fill = document.getElementById('progress-fill');
+  if (fill) fill.style.width = Math.min(100, Math.max(0, percent)) + '%';
+}
+
+// ─── Chat badge ───
+
+function updateChatBadge() {
+  const heading = document.querySelector('.chat-section > h2');
+  if (!heading) return;
+  let badge = heading.querySelector('.chat-badge');
+  if (chatUnread > 0) {
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'chat-badge';
+      heading.appendChild(badge);
+    }
+    badge.textContent = chatUnread > 99 ? '99+' : chatUnread;
+  } else if (badge) {
+    badge.remove();
+  }
+}
+
+function isChatScrolledToBottom() {
+  const el = document.getElementById('chat-messages');
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
 }
 
 // ─── Storage (localStorage) ───
@@ -220,8 +294,10 @@ function startYouTubeSeekUpdates() {
       const timeEl = window.__seekTimeEl;
       if (!bar || !timeEl || !d) return;
       window.__durationMs = d * 1000;
-      bar.value = d > 0 ? (p / d) * 100 : 0;
+      const pct = d > 0 ? (p / d) * 100 : 0;
+      bar.value = pct;
       timeEl.textContent = `${formatTime(p)} / ${formatTime(d)}`;
+      updateProgressBar(pct);
     } catch { /* player not ready */ }
   }, 300);
 }
@@ -260,6 +336,8 @@ function connectAndJoin(name, roomId) {
   socket = io(getSocketOrigin(), { path: '/socket.io', transports: ['websocket', 'polling'] });
 
   socket.on('connect', () => {
+    const dot = document.getElementById('conn-status');
+    if (dot) { dot.className = 'conn-dot conn-dot-ok'; dot.title = 'Connected'; }
     socket.emit('join', { username: name, roomId: roomId || null });
   });
 
@@ -311,9 +389,29 @@ function connectAndJoin(name, roomId) {
     if (joined) appendChatMessage(entry);
   });
 
+  socket.on('disconnect', () => {
+    const dot = document.getElementById('conn-status');
+    if (dot) { dot.className = 'conn-dot conn-dot-off'; dot.title = 'Disconnected'; }
+  });
+
   socket.on('connect_error', () => {
+    const dot = document.getElementById('conn-status');
+    if (dot) { dot.className = 'conn-dot conn-dot-off'; dot.title = 'Connection error'; }
     const el = document.getElementById('join-error');
     if (el) el.textContent = 'Could not connect. Is the server running?';
+  });
+
+  socket.on('typing', ({ username: who }) => {
+    if (who === username) return;
+    const indicator = document.getElementById('typing-indicator');
+    if (indicator) indicator.textContent = `${who} is typing\u2026`;
+    if (typingTimeouts[who]) clearTimeout(typingTimeouts[who]);
+    typingTimeouts[who] = setTimeout(() => {
+      delete typingTimeouts[who];
+      const remaining = Object.keys(typingTimeouts);
+      const ind = document.getElementById('typing-indicator');
+      if (ind) ind.textContent = remaining.length > 0 ? `${remaining[0]} is typing\u2026` : '';
+    }, 3000);
   });
 }
 
@@ -328,6 +426,8 @@ function applyParticipants(list) {
 
 function clearNowPlaying() {
   window.__durationMs = 0;
+  document.title = 'SoundShare';
+  updateFavicon(false);
   if (joined) {
     updateQueueList();
     updateParticipantsList();
@@ -336,6 +436,7 @@ function clearNowPlaying() {
 
 function setPlayingState(playing) {
   window.__isPlaying = playing;
+  updateFavicon(playing);
   updatePlayerControls();
 }
 
@@ -393,6 +494,7 @@ function resetSeekBar() {
   if (seekBar) seekBar.value = 0;
   if (seekTime) seekTime.textContent = '0:00 / 0:00';
   window.__durationMs = 0;
+  updateProgressBar(0);
 }
 
 function handleRemotePlay(data) {
@@ -468,8 +570,10 @@ function startSoundCloudSeekUpdates(widget) {
         const timeEl = window.__seekTimeEl;
         if (!bar || !timeEl || !d) return;
         window.__durationMs = d;
-        bar.value = d > 0 ? (p / d) * 100 : 0;
+        const pct = d > 0 ? (p / d) * 100 : 0;
+        bar.value = pct;
         timeEl.textContent = `${formatTime(p / 1000)} / ${formatTime(d / 1000)}`;
+        updateProgressBar(pct);
       });
     });
   }, 300);
@@ -498,9 +602,11 @@ function updateSeekBar(audio) {
   const d = audio.duration;
   const t = audio.currentTime;
   if (!isFinite(d) || d === 0) return;
-  bar.value = (t / d) * 100;
+  const pct = (t / d) * 100;
+  bar.value = pct;
   window.__durationMs = d * 1000;
   timeEl.textContent = `${formatTime(t)} / ${formatTime(d)}`;
+  updateProgressBar(pct);
 }
 
 function applyVolume(valuePercent) {
@@ -546,11 +652,11 @@ async function handlePlay(url) {
 
   socket.emit('play', { type, url: playUrl, positionMs: 0, name });
 
-  // #1 Clear input after queuing
   const input = document.getElementById('audio-url');
-  if (input) input.value = '';
+  if (input) { input.value = ''; input.focus(); }
+  updateUrlBadge();
 
-  // #2 Toast feedback
+  // Toast feedback
   const queueLen = (window.__queue || []).length;
   if (queueLen > 0) {
     showToast(`Added to queue (#${queueLen + 1})`, 'success');
@@ -599,6 +705,7 @@ function renderJoin() {
 
 function renderLobby(room) {
   const roomLabel = room && room !== 'lobby' ? room : 'lobby';
+  currentRoomLabel = roomLabel;
   const shareUrl = room && room !== 'lobby'
     ? `${window.location.origin}${window.location.pathname}#${room}`
     : '';
@@ -608,7 +715,8 @@ function renderLobby(room) {
     <header class="lobby-header">
       <div class="lobby-title-row">
         <h1>SoundShare</h1>
-        <span class="room-badge" title="Room code">${escapeHtml(roomLabel)}</span>
+        <span id="conn-status" class="conn-dot conn-dot-ok" title="Connected"></span>
+        <span class="room-badge" id="room-badge" title="Room code">${escapeHtml(roomLabel)}</span>
       </div>
       <div class="lobby-meta">
         <span class="you">You: <strong>${coloredUsername(username)}</strong></span>
@@ -627,6 +735,7 @@ function renderLobby(room) {
         <p class="player-hint">Paste a SoundCloud, YouTube, Google Drive, or direct audio URL.</p>
         <div class="url-row">
           <input type="url" id="audio-url" placeholder="Paste URL and press Enter or click Queue" />
+          <span id="url-type-badge" class="url-type-badge"></span>
           <button type="button" id="btn-queue">Queue</button>
         </div>
         <div class="queue-section" id="queue-section"></div>
@@ -644,6 +753,7 @@ function renderLobby(room) {
           <button type="button" class="reaction-btn" data-emoji="\uD83D\uDE02">\uD83D\uDE02</button>
         </div>
         <div class="chat-messages" id="chat-messages"></div>
+        <div id="typing-indicator" class="typing-indicator"></div>
         <div class="chat-input-row">
           <input type="text" id="chat-input" placeholder="Type a message\u2026" maxlength="500" />
           <button type="button" id="btn-chat-send">Send</button>
@@ -682,6 +792,9 @@ function updateParticipantsList() {
     const isSharer = p === sharer;
     return `<li>${coloredUsername(p)}${isSharer ? ' <span class="sharer-badge" aria-label="Now playing">\u25B6</span>' : ''}</li>`;
   }).join('');
+
+  const badge = document.getElementById('room-badge');
+  if (badge) badge.textContent = `${currentRoomLabel} (${participants.length})`;
 }
 
 // ─── UI: Player controls ───
@@ -689,8 +802,11 @@ function updateParticipantsList() {
 function updatePlayerControls() {
   const btnPause = document.getElementById('btn-pause');
   const btnSkip = document.getElementById('btn-skip');
+  const card = document.getElementById('now-playing-card');
   const isSharer = username === (window.__currentSharer || null);
   const playing = window.__isPlaying;
+
+  if (card) card.setAttribute('data-playing', playing ? 'true' : 'false');
 
   if (btnPause) {
     btnPause.disabled = !isSharer;
@@ -702,6 +818,14 @@ function updatePlayerControls() {
   if (btnSkip) {
     btnSkip.disabled = !(isSharer && (playing || window.__currentTrack));
     btnSkip.title = isSharer ? 'Skip to next track' : 'Only the sharer can skip';
+  }
+
+  const queue = window.__queue || [];
+  if (queue.length > 0 && playing) {
+    const name = queue[0].name || trackName(queue[0].url);
+    document.title = `${name} - SoundShare`;
+  } else {
+    document.title = 'SoundShare';
   }
 }
 
@@ -721,8 +845,10 @@ function updateQueueList() {
     const np = queue[0];
     const seekVal = window.__seekBar?.value || 0;
     const seekTime = window.__seekTimeEl?.textContent || '0:00 / 0:00';
-    html += `<div class="now-playing-card" id="now-playing-card">
+    const playingAttr = window.__isPlaying ? 'true' : 'false';
+    html += `<div class="now-playing-card npc-entering" id="now-playing-card" data-playing="${playingAttr}">
       <div class="npc-top">
+        <div class="eq-bars" aria-hidden="true"><span class="eq-bar"></span><span class="eq-bar"></span><span class="eq-bar"></span></div>
         <button type="button" id="btn-pause" class="npc-btn npc-btn-pause" title="Pause">\u275A\u275A</button>
         <div class="npc-info">
           <span class="npc-track">${escapeHtml(np.name || trackName(np.url))}</span>
@@ -738,6 +864,7 @@ function updateQueueList() {
         <span class="npc-vol-icon">\uD83D\uDD0A</span>
         <input type="range" id="volume-slider" min="0" max="100" value="${vol}" />
       </div>
+      <div class="npc-progress"><div class="npc-progress-fill" id="progress-fill" style="width:${seekVal}%"></div></div>
     </div>`;
   } else {
     html += `<div class="now-playing-card now-playing-card-empty">
@@ -771,12 +898,16 @@ function updateQueueList() {
   window.__seekBar = document.getElementById('seek-bar');
   window.__seekTimeEl = document.getElementById('seek-time');
 
-  // Bind card controls
   bindCardControls();
   bindQueueDragHandlers();
   bindQueueRemoveHandlers();
   updatePlayerControls();
   if (upNext.length > 0) scrollQueueIntoView();
+
+  const enteringCard = container.querySelector('.npc-entering');
+  if (enteringCard) {
+    requestAnimationFrame(() => enteringCard.classList.remove('npc-entering'));
+  }
 }
 
 function bindCardControls() {
@@ -1034,15 +1165,27 @@ function appendChatMessage(entry, scroll = true) {
   if (!container) return;
 
   const div = document.createElement('div');
-  div.className = entry.type === 'reaction' ? 'chat-msg chat-reaction' : 'chat-msg';
 
-  if (entry.type === 'reaction') {
+  if (entry.type === 'system') {
+    div.className = 'chat-msg chat-system';
+    div.innerHTML = `${coloredUsername(entry.username)} ${escapeHtml(entry.message)}`;
+  } else if (entry.type === 'reaction') {
+    div.className = 'chat-msg chat-reaction';
     div.innerHTML = `${coloredUsername(entry.username)} ${escapeHtml(entry.message)}`;
   } else {
+    div.className = 'chat-msg';
     div.innerHTML = `<span class="chat-author">${coloredUsername(entry.username)}</span> ${escapeHtml(entry.message)}`;
   }
   container.appendChild(div);
-  if (scroll) container.scrollTop = container.scrollHeight;
+
+  if (scroll && isChatScrolledToBottom()) {
+    container.scrollTop = container.scrollHeight;
+    chatUnread = 0;
+    updateChatBadge();
+  } else if (scroll) {
+    chatUnread++;
+    updateChatBadge();
+  }
 }
 
 function sendChat() {
@@ -1059,10 +1202,27 @@ function bindChatHandlers() {
   const btn = document.getElementById('btn-chat-send');
   if (input) {
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
+      if (e.key === 'Enter') { e.preventDefault(); sendChat(); return; }
+      if (socket && joined) {
+        const now = Date.now();
+        if (now - lastTypingEmit > 2000) {
+          lastTypingEmit = now;
+          socket.emit('typing');
+        }
+      }
     });
   }
   if (btn) btn.addEventListener('click', sendChat);
+
+  const chatMessages = document.getElementById('chat-messages');
+  if (chatMessages) {
+    chatMessages.addEventListener('scroll', () => {
+      if (isChatScrolledToBottom()) {
+        chatUnread = 0;
+        updateChatBadge();
+      }
+    });
+  }
 
   document.querySelectorAll('.reaction-btn').forEach(b => {
     b.addEventListener('click', () => {
@@ -1086,6 +1246,7 @@ function bindPlayerHandlers() {
     urlInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); handlePlay(urlInput.value.trim()); }
     });
+    urlInput.addEventListener('input', updateUrlBadge);
   }
 
   const audio = document.getElementById('html-audio');

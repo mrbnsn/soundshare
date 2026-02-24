@@ -214,6 +214,12 @@ io.on('connection', (socket) => {
     const pList = getRoomParticipants(room);
     io.to(room).emit('participants', { participants: pList });
 
+    const joinEntry = { username: name, message: 'joined the room', timestamp: Date.now(), color: assignColor(room, name), type: 'system' };
+    const chat = getChat(room);
+    chat.push(joinEntry);
+    if (chat.length > MAX_CHAT) chat.shift();
+    io.to(room).emit('chat', joinEntry);
+
     socket.emit('joined', {
       username: name,
       room,
@@ -304,6 +310,11 @@ io.on('connection', (socket) => {
     io.to(room).emit('seek', { ...payload, username: socket.username });
   });
 
+  socket.on('typing', () => {
+    const room = socket.room || DEFAULT_ROOM;
+    socket.to(room).emit('typing', { username: socket.username });
+  });
+
   socket.on('chat_message', (payload) => {
     const { message, type: msgType } = payload || {};
     if (!message || typeof message !== 'string') return;
@@ -333,6 +344,11 @@ io.on('connection', (socket) => {
     if (roomEmpty) {
       clearRoomData(room);
     } else {
+      const leaveEntry = { username: socket.username, message: 'left the room', timestamp: Date.now(), color: assignColor(room, socket.username), type: 'system' };
+      const chat = getChat(room);
+      chat.push(leaveEntry);
+      if (chat.length > MAX_CHAT) chat.shift();
+      io.to(room).emit('chat', leaveEntry);
       const queue = getQueue(room);
       if (queue.length > 0 && queue[0].username === socket.username) {
         addToHistory(room, queue[0]);
