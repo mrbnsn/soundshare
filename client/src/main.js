@@ -70,6 +70,12 @@ function setNowPlaying(text) {
   if (el) el.textContent = text || '';
 }
 
+function setPlayingState(playing) {
+  window.__isPlaying = playing;
+  const btn = document.getElementById('btn-play-pause');
+  if (btn) btn.textContent = playing ? 'Pause' : 'Play';
+}
+
 function shortUrl(url) {
   try {
     const u = new URL(url);
@@ -83,23 +89,24 @@ function shortUrl(url) {
 function handleRemotePlay(data) {
   const { type, url, positionMs = 0, atTimestamp, username: who } = data || {};
   if (!url) return;
+  window.__currentSharer = who || null;
+  if (window.__scSeekInterval) {
+    clearInterval(window.__scSeekInterval);
+    window.__scSeekInterval = null;
+  }
   setNowPlaying(`Now playing (started by ${escapeHtml(who || 'someone')}): ${shortUrl(url)}`);
+  window.__currentTrack = { type, url };
+  let playUrl = url;
   if (type === 'file') {
     const audio = document.getElementById('html-audio');
     if (!audio) return;
     const doPlay = () => {
-      audio.src = url;
+      audio.src = playUrl;
       audio.currentTime = (positionMs || 0) / 1000;
       audio.play().catch((err) => setNowPlaying(`Playback error: ${err.message}`));
+      setPlayingState(true);
     };
     scheduleAt(atTimestamp || Date.now(), doPlay);
-    audio.addEventListener('durationchange', () => {
-      window.__durationMs = audio.duration * 1000;
-      const row = document.getElementById('seek-row');
-      if (row) row.hidden = false;
-    }, { once: true });
-    audio.addEventListener('timeupdate', () => updateSeekBar(audio));
-    audio.addEventListener('ended', () => updateSeekBar(audio));
   }
   if (type === 'soundcloud') {
     window.__pendingSoundCloud = { url, positionMs, atTimestamp, who };
@@ -115,16 +122,40 @@ function applySoundCloudPlay(widget, { url, positionMs, atTimestamp }) {
     scheduleAt(atTimestamp || Date.now(), () => {
       widget.seekTo(positionMs || 0);
       widget.play();
+      setPlayingState(true);
+      startSoundCloudSeekUpdates(widget);
     });
   } });
 }
 
-function handleRemotePause(data) {
+function startSoundCloudSeekUpdates(widget) {
+  if (window.__scSeekInterval) clearInterval(window.__scSeekInterval);
+  const seekRow = document.getElementById('seek-row');
+  if (seekRow) seekRow.hidden = false;
+  window.__scSeekInterval = setInterval(() => {
+    if (!widget) return;
+    widget.getDuration((d) => {
+      widget.getPosition((p) => {
+        const bar = window.__seekBar;
+        const timeEl = window.__seekTimeEl;
+        if (!bar || !timeEl || !d) return;
+        window.__durationMs = d;
+        bar.value = d > 0 ? (p / d) * 100 : 0;
+        timeEl.textContent = `${formatTime(p / 1000)} / ${formatTime(d / 1000)}`;
+      });
+    });
+  }, 300);
+}
+
+function handleRemotePause() {
+  setPlayingState(false);
+  if (window.__scSeekInterval) {
+    clearInterval(window.__scSeekInterval);
+    window.__scSeekInterval = null;
+  }
   const audio = document.getElementById('html-audio');
   if (audio) audio.pause();
-  if (window.__scWidget) {
-    window.__scWidget.pause();
-  }
+  if (window.__scWidget) window.__scWidget.pause();
 }
 
 function handleRemoteSeek(data) {
@@ -132,9 +163,11 @@ function handleRemoteSeek(data) {
   const audio = document.getElementById('html-audio');
   if (audio && !isNaN(positionMs)) {
     audio.currentTime = positionMs / 1000;
+    audio.play().catch(() => {});
   }
   if (window.__scWidget && !isNaN(positionMs)) {
     window.__scWidget.seekTo(positionMs);
+    window.__scWidget.play();
   }
 }
 
@@ -174,11 +207,10 @@ function renderLobby() {
     </section>
     <section class="player-section">
       <h2>Play audio</h2>
-      <p>Paste a SoundCloud link or a direct URL to an audio file (mp3, wav, etc.).</p>
+      <p>Paste a SoundCloud link, a shared Google Drive file link, or a direct URL to an audio file (mp3, wav, etc.).</p>
       <div class="url-row">
-        <input type="url" id="audio-url" placeholder="https://soundcloud.com/... or https://example.com/track.mp3" />
-        <button type="button" id="btn-play">Play</button>
-        <button type="button" id="btn-pause">Pause</button>
+        <input type="url" id="audio-url" placeholder="SoundCloud, Google Drive, or direct audio URL (mp3, wav…)" />
+        <button type="button" id="btn-play-pause">Play</button>
       </div>
       <p id="now-playing" class="now-playing" aria-live="polite"></p>
       <div class="seek-row" id="seek-row" hidden>
@@ -202,14 +234,35 @@ function escapeHtml(s) {
 
 function bindPlayerHandlers() {
   const urlInput = document.getElementById('audio-url');
-  document.getElementById('btn-play').addEventListener('click', () => handlePlay(urlInput.value.trim()));
-  document.getElementById('btn-pause').addEventListener('click', () => handlePause());
+  document.getElementById('btn-play-pause').addEventListener('click', () => {
+    if (window.__isPlaying) {
+      handlePause();
+    } else {
+      handlePlayOrResume(urlInput.value.trim());
+    }
+  });
   const seekBar = document.getElementById('seek-bar');
   const seekRow = document.getElementById('seek-row');
+  const audio = document.getElementById('html-audio');
+  if (audio) {
+    audio.addEventListener('durationchange', () => {
+      window.__durationMs = audio.duration * 1000;
+      if (seekRow) seekRow.hidden = false;
+      updateSeekBar(audio);
+    });
+    audio.addEventListener('timeupdate', () => updateSeekBar(audio));
+    audio.addEventListener('ended', () => {
+      updateSeekBar(audio);
+      setPlayingState(false);
+    });
+  }
   if (seekBar) {
     seekBar.addEventListener('input', () => {
       const positionMs = (seekBar.value / 100) * (window.__durationMs || 0);
-      if (socket && joined) socket.emit('seek', { positionMs });
+      localSeek(positionMs);
+      if (socket && joined && username === window.__currentSharer) {
+        socket.emit('seek', { positionMs });
+      }
     });
   }
   window.__seekBar = seekBar;
@@ -217,16 +270,78 @@ function bindPlayerHandlers() {
   window.__seekTimeEl = document.getElementById('seek-time');
 }
 
+function localSeek(positionMs) {
+  const audio = document.getElementById('html-audio');
+  if (audio && !isNaN(positionMs)) audio.currentTime = positionMs / 1000;
+  if (window.__scWidget && !isNaN(positionMs)) window.__scWidget.seekTo(positionMs);
+}
+
+function handlePlayOrResume(url) {
+  if (!socket || !joined) return;
+  const track = window.__currentTrack;
+  const isResume = !url && track && track.url;
+  if (isResume && track) {
+    if (username === window.__currentSharer) {
+      getCurrentPositionMs((positionMs) => {
+        if (positionMs != null) socket.emit('play', { type: track.type, url: track.url, positionMs });
+      });
+    } else {
+      localResume();
+      setPlayingState(true);
+    }
+    return;
+  }
+  if (!url) return;
+  handlePlay(url);
+}
+
+function localResume() {
+  const audio = document.getElementById('html-audio');
+  if (audio && audio.src) audio.play().catch(() => {});
+  if (window.__scWidget) window.__scWidget.play();
+}
+
+function getCurrentPositionMs(cb) {
+  const audio = document.getElementById('html-audio');
+  if (audio && audio.src && isFinite(audio.duration)) {
+    cb(audio.currentTime * 1000);
+    return;
+  }
+  if (window.__scWidget) {
+    window.__scWidget.getPosition((p) => cb(p));
+    return;
+  }
+  cb(0);
+}
+
 function handlePlay(url) {
   if (!url) return;
   if (!socket || !joined) return;
-  const type = isSoundCloudUrl(url) ? 'soundcloud' : 'file';
+  let type;
+  if (isSoundCloudUrl(url)) {
+    type = 'soundcloud';
+  } else if (isGoogleDriveUrl(url)) {
+    url = getGoogleDriveProxyUrl(url);
+    type = 'file';
+  } else {
+    type = 'file';
+  }
   socket.emit('play', { type, url, positionMs: 0 });
 }
 
 function handlePause() {
   if (!socket || !joined) return;
-  socket.emit('pause');
+  localPause();
+  setPlayingState(false);
+  if (username === window.__currentSharer) {
+    socket.emit('pause');
+  }
+}
+
+function localPause() {
+  const audio = document.getElementById('html-audio');
+  if (audio) audio.pause();
+  if (window.__scWidget) window.__scWidget.pause();
 }
 
 function isSoundCloudUrl(url) {
@@ -236,6 +351,32 @@ function isSoundCloudUrl(url) {
   } catch {
     return false;
   }
+}
+
+function isGoogleDriveUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.hostname === 'drive.google.com' && /\/file\/d\/([^/]+)/.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function getGoogleDriveFileId(shareUrl) {
+  const match = shareUrl.match(/\/file\/d\/([^/]+)/);
+  return match ? match[1] : null;
+}
+
+function getGoogleDriveDirectUrl(shareUrl) {
+  const id = getGoogleDriveFileId(shareUrl);
+  if (!id) return shareUrl;
+  return `https://drive.google.com/uc?export=download&id=${id}`;
+}
+
+function getGoogleDriveProxyUrl(shareUrl) {
+  const id = getGoogleDriveFileId(shareUrl);
+  if (!id) return shareUrl;
+  return `/api/audio-proxy?id=${encodeURIComponent(id)}`;
 }
 
 function initSoundCloudWidget() {

@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { Readable } from 'stream';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProd = process.env.NODE_ENV === 'production';
@@ -13,6 +14,37 @@ const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
   cors: isProd ? undefined : { origin: 'http://localhost:5173', methods: ['GET', 'POST'] },
+});
+
+app.get('/api/audio-proxy', async (req, res) => {
+  const id = req.query.id;
+  if (!id || typeof id !== 'string') {
+    res.status(400).send('Missing id');
+    return;
+  }
+  const driveUrl = `https://drive.google.com/uc?export=download&id=${encodeURIComponent(id)}`;
+  try {
+    const resp = await fetch(driveUrl, {
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+    if (!resp.ok) {
+      res.status(resp.status).send('Upstream error');
+      return;
+    }
+    const contentType = resp.headers.get('content-type') || 'audio/mpeg';
+    if (contentType.includes('text/html')) {
+      res.status(502).send('Google Drive returned a page instead of a file. Try opening the link in a browser and confirm download, or use a different host.');
+      return;
+    }
+    res.setHeader('Content-Type', contentType);
+    Readable.fromWeb(resp.body).pipe(res);
+  } catch (err) {
+    console.error('Audio proxy error:', err.message);
+    res.status(502).send('Could not fetch file');
+  }
 });
 
 if (isProd) {

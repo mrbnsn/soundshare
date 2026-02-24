@@ -157,22 +157,14 @@ body {
   cursor: pointer;
 }
 
-#btn-play {
+#btn-play-pause {
   background: #4a7c59;
   color: #fff;
+  min-width: 5rem;
 }
 
-#btn-play:hover {
+#btn-play-pause:hover {
   background: #5a8c69;
-}
-
-#btn-pause {
-  background: #555;
-  color: #fff;
-}
-
-#btn-pause:hover {
-  background: #666;
 }
 
 .now-playing {
