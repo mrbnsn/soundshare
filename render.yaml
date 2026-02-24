@@ -1,0 +1,11 @@
+# Render Blueprint – optional one-click deploy
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: soundshare
+    env: node
+    buildCommand: npm run install:all && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
