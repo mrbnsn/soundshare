@@ -1222,7 +1222,7 @@ function appendChatMessage(entry, scroll = true) {
   } else if (entry.type === 'reaction') {
     div.className = 'chat-msg chat-reaction';
     div.innerHTML = `${coloredUsername(entry.username)} ${escapeHtml(entry.message)}`;
-    if (scroll) emojiExplosion(entry.message, null);
+    if (scroll && isOther) emojiExplosion(entry.message, null);
   } else {
     div.className = 'chat-msg';
     div.innerHTML = `<span class="chat-author">${coloredUsername(entry.username)}</span> ${escapeHtml(entry.message)}`;
