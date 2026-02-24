@@ -1,6 +1,8 @@
 import { io } from 'socket.io-client';
 import './style.css';
 
+// ─── State ───
+
 const app = document.getElementById('app');
 let socket = null;
 let username = '';
@@ -9,82 +11,10 @@ let participants = [];
 
 window.__userColors = {};
 window.__queue = [];
+window.__history = [];
+window.__chatMessages = [];
 
-function getSocketOrigin() {
-  if (import.meta.env.DEV) return undefined;
-  return window.location.origin;
-}
-
-function renderJoin() {
-  app.innerHTML = `
-    <div class="join-screen">
-      <h1>SoundShare</h1>
-      <p class="tagline">Synchronized audio for your group</p>
-      <form id="join-form" class="join-form">
-        <input type="text" id="username" placeholder="Your name" maxlength="32" required autofocus />
-        <button type="submit">Join Lobby</button>
-      </form>
-      <p id="join-error" class="error" aria-live="polite"></p>
-    </div>
-  `;
-  document.getElementById('join-form').addEventListener('submit', (e) => {
-    e.preventDefault();
-    const input = document.getElementById('username');
-    const name = (input.value || '').trim();
-    if (!name) {
-      document.getElementById('join-error').textContent = 'Enter a name.';
-      return;
-    }
-    document.getElementById('join-error').textContent = '';
-    username = name;
-    connectAndJoin(name);
-  });
-}
-
-function connectAndJoin(name) {
-  socket = io(getSocketOrigin(), { path: '/socket.io', transports: ['websocket', 'polling'] });
-  socket.on('connect', () => {
-    socket.emit('join', { username: name, roomId: null });
-  });
-  socket.on('joined', (data) => {
-    joined = true;
-    window.__queue = data.queue || [];
-    if (Array.isArray(data.participants)) {
-      applyParticipants(data.participants);
-    }
-    renderLobby();
-  });
-  socket.on('participants', (data) => {
-    applyParticipants(data.participants || []);
-    if (joined) updateParticipantsList();
-  });
-  socket.on('queue', (data) => {
-    window.__queue = data.queue || [];
-    if (joined) updateQueueList();
-  });
-  socket.on('play', (data) => handleRemotePlay(data));
-  socket.on('seek', (data) => handleRemoteSeek(data));
-  socket.on('queue_preview', (data) => {
-    if (joined && !dragState) applyRemoteDragPreview(data);
-  });
-  socket.on('queue_preview_end', () => {
-    if (joined) clearRemoteDragPreview();
-  });
-  socket.on('connect_error', () => {
-    document.getElementById('join-error').textContent = 'Could not connect. Is the server running?';
-  });
-}
-
-function applyParticipants(list) {
-  participants = list.map(p => typeof p === 'string' ? p : p.username);
-  list.forEach(p => {
-    if (typeof p === 'object' && p.color) {
-      window.__userColors[p.username] = p.color;
-    }
-  });
-}
-
-// ─── Color helpers ───
+// ─── Utilities ───
 
 function escapeHtml(s) {
   const div = document.createElement('div');
@@ -97,7 +27,16 @@ function coloredUsername(name) {
   return `<span class="username-colored" style="color:${color}">${escapeHtml(name)}</span>`;
 }
 
-// ─── Playback ───
+function capitalize(s) {
+  return s.replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function formatTime(seconds) {
+  if (!isFinite(seconds) || seconds < 0) return '0:00';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 function scheduleAt(atTimestamp, fn) {
   const delay = atTimestamp - Date.now();
@@ -105,21 +44,74 @@ function scheduleAt(atTimestamp, fn) {
   else setTimeout(fn, delay);
 }
 
-function setNowPlaying(who, name) {
-  const el = document.getElementById('now-playing');
-  if (!el) return;
-  if (!name) { el.textContent = who || ''; return; }
-  el.innerHTML = `Now playing (${coloredUsername(who)}): <strong>${escapeHtml(name)}</strong>`;
+// ─── Toast system ───
+
+function ensureToastContainer() {
+  let c = document.getElementById('toast-container');
+  if (!c) {
+    c = document.createElement('div');
+    c.id = 'toast-container';
+    c.className = 'toast-container';
+    document.body.appendChild(c);
+  }
+  return c;
 }
 
-function setPlayingState(playing) {
-  window.__isPlaying = playing;
-  updateSkipButtonVisibility();
+function showToast(message, type = 'info', duration = 3000) {
+  const container = ensureToastContainer();
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('toast-visible'));
+  setTimeout(() => {
+    toast.classList.remove('toast-visible');
+    toast.addEventListener('transitionend', () => toast.remove(), { once: true });
+    setTimeout(() => toast.remove(), 500);
+  }, duration);
 }
 
-function capitalize(s) {
-  return s.replace(/\b\w/g, c => c.toUpperCase());
+// ─── Storage (localStorage) ───
+
+function loadUsername() {
+  try { return localStorage.getItem('soundshare_username') || ''; } catch { return ''; }
 }
+
+function saveUsername(name) {
+  try { localStorage.setItem('soundshare_username', name); } catch { /* noop */ }
+}
+
+function loadVolume() {
+  try { return Number(localStorage.getItem('soundshare_volume') ?? 100); } catch { return 100; }
+}
+
+function saveVolume(v) {
+  try { localStorage.setItem('soundshare_volume', String(v)); } catch { /* noop */ }
+}
+
+// ─── Room routing (hash-based) ───
+
+function getRoomFromUrl() {
+  const hash = window.location.hash.replace(/^#/, '').trim();
+  return hash || null;
+}
+
+function setRoomInUrl(roomId) {
+  if (roomId && roomId !== 'lobby') {
+    history.replaceState(null, '', `#${roomId}`);
+  } else {
+    history.replaceState(null, '', window.location.pathname);
+  }
+}
+
+function generateRoomCode() {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let code = '';
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
+// ─── Track name parsing ───
 
 function trackName(url) {
   try {
@@ -132,55 +124,291 @@ function trackName(url) {
         return `${track} \u2014 ${artist}`;
       }
     }
-    if (u.hostname === 'drive.google.com') {
-      return 'Google Drive audio';
-    }
-    if (u.pathname === '/api/audio-proxy') {
-      return 'Google Drive audio';
-    }
+    if (u.hostname === 'drive.google.com') return 'Google Drive audio';
+    if (u.pathname === '/api/audio-proxy') return 'Google Drive audio';
+    if (isYouTubeUrl(url)) return 'YouTube video';
     const filename = decodeURIComponent(u.pathname.split('/').pop() || '');
-    if (filename) {
-      return filename.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ');
-    }
+    if (filename) return filename.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ');
   } catch { /* fall through */ }
   return url.length > 40 ? url.slice(0, 37) + '\u2026' : url;
+}
+
+// ─── YouTube helpers ───
+
+function isYouTubeUrl(url) {
+  try {
+    const u = new URL(url);
+    return /^(www\.)?(youtube\.com|youtu\.be)$/.test(u.hostname);
+  } catch { return false; }
+}
+
+function getYouTubeVideoId(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname === 'youtu.be') return u.pathname.slice(1).split('/')[0];
+    if (u.searchParams.has('v')) return u.searchParams.get('v');
+    if (u.pathname.startsWith('/embed/')) return u.pathname.split('/')[2];
+  } catch { /* noop */ }
+  return null;
+}
+
+async function fetchYouTubeTitle(url) {
+  try {
+    const resp = await fetch(`/api/youtube-title?url=${encodeURIComponent(url)}`);
+    if (resp.ok) {
+      const data = await resp.json();
+      return data.title || 'YouTube video';
+    }
+  } catch { /* noop */ }
+  return 'YouTube video';
+}
+
+let ytPlayer = null;
+let ytReady = false;
+let ytReadyPromise = null;
+
+function initYouTubePlayer() {
+  if (ytReadyPromise) return ytReadyPromise;
+  ytReadyPromise = new Promise((resolve) => {
+    function createPlayer() {
+      const container = document.getElementById('youtube-container');
+      if (!container) { resolve(null); return; }
+      if (!container.querySelector('#youtube-player')) {
+        const div = document.createElement('div');
+        div.id = 'youtube-player';
+        container.appendChild(div);
+      }
+      ytPlayer = new window.YT.Player('youtube-player', {
+        height: '1',
+        width: '1',
+        playerVars: { autoplay: 0, controls: 0 },
+        events: {
+          onReady: () => { ytReady = true; resolve(ytPlayer); },
+          onStateChange: (event) => {
+            if (event.data === window.YT.PlayerState.ENDED) {
+              setPlayingState(false);
+              if (socket && joined && username === window.__currentSharer && window.__currentTrack?.type === 'youtube') {
+                socket.emit('track_ended');
+              }
+            }
+          },
+        },
+      });
+    }
+    if (window.YT && window.YT.Player) {
+      createPlayer();
+    } else {
+      if (!document.querySelector('script[src*="youtube.com/iframe_api"]')) {
+        const tag = document.createElement('script');
+        tag.src = 'https://www.youtube.com/iframe_api';
+        document.head.appendChild(tag);
+      }
+      window.onYouTubeIframeAPIReady = createPlayer;
+    }
+  });
+  return ytReadyPromise;
+}
+
+function startYouTubeSeekUpdates() {
+  if (window.__ytSeekInterval) clearInterval(window.__ytSeekInterval);
+  const seekRow = document.getElementById('seek-row');
+  if (seekRow) seekRow.hidden = false;
+  window.__ytSeekInterval = setInterval(() => {
+    if (!ytPlayer || !ytReady) return;
+    try {
+      const d = ytPlayer.getDuration();
+      const p = ytPlayer.getCurrentTime();
+      const bar = window.__seekBar;
+      const timeEl = window.__seekTimeEl;
+      if (!bar || !timeEl || !d) return;
+      window.__durationMs = d * 1000;
+      bar.value = d > 0 ? (p / d) * 100 : 0;
+      timeEl.textContent = `${formatTime(p)} / ${formatTime(d)}`;
+    } catch { /* player not ready */ }
+  }, 300);
+}
+
+// ─── SoundCloud helpers ───
+
+function isSoundCloudUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.hostname === 'soundcloud.com' || u.hostname === 'www.soundcloud.com';
+  } catch { return false; }
+}
+
+// ─── Google Drive helpers ───
+
+function isGoogleDriveUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.hostname === 'drive.google.com' && /\/file\/d\/([^/]+)/.test(u.pathname);
+  } catch { return false; }
+}
+
+function getGoogleDriveProxyUrl(shareUrl) {
+  const match = shareUrl.match(/\/file\/d\/([^/]+)/);
+  return match ? `/api/audio-proxy?id=${encodeURIComponent(match[1])}` : shareUrl;
+}
+
+// ─── Socket connection ───
+
+function getSocketOrigin() {
+  if (import.meta.env.DEV) return undefined;
+  return window.location.origin;
+}
+
+function connectAndJoin(name, roomId) {
+  socket = io(getSocketOrigin(), { path: '/socket.io', transports: ['websocket', 'polling'] });
+
+  socket.on('connect', () => {
+    socket.emit('join', { username: name, roomId: roomId || null });
+  });
+
+  socket.on('joined', (data) => {
+    joined = true;
+    window.__queue = data.queue || [];
+    window.__history = data.history || [];
+    window.__chatMessages = data.chat || [];
+    if (Array.isArray(data.participants)) applyParticipants(data.participants);
+    setRoomInUrl(data.room);
+    renderLobby(data.room);
+  });
+
+  socket.on('participants', (data) => {
+    applyParticipants(data.participants || []);
+    if (joined) updateParticipantsList();
+  });
+
+  socket.on('queue', (data) => {
+    window.__queue = data.queue || [];
+    if (joined) updateQueueList();
+  });
+
+  socket.on('queue_empty', () => {
+    window.__currentSharer = null;
+    window.__currentTrack = null;
+    setPlayingState(false);
+    clearNowPlaying();
+  });
+
+  socket.on('history', (data) => {
+    window.__history = data.history || [];
+    if (joined) updateHistoryList();
+  });
+
+  socket.on('play', (data) => handleRemotePlay(data));
+  socket.on('seek', (data) => handleRemoteSeek(data));
+
+  socket.on('queue_preview', (data) => {
+    if (joined && !dragState) applyRemoteDragPreview(data);
+  });
+  socket.on('queue_preview_end', () => {
+    if (joined) clearRemoteDragPreview();
+  });
+
+  socket.on('chat', (entry) => {
+    window.__chatMessages.push(entry);
+    if (joined) appendChatMessage(entry);
+  });
+
+  socket.on('connect_error', () => {
+    const el = document.getElementById('join-error');
+    if (el) el.textContent = 'Could not connect. Is the server running?';
+  });
+}
+
+function applyParticipants(list) {
+  participants = list.map(p => typeof p === 'string' ? p : p.username);
+  list.forEach(p => {
+    if (typeof p === 'object' && p.color) window.__userColors[p.username] = p.color;
+  });
+}
+
+// ─── Playback engine ───
+
+function setNowPlaying(who, name) {
+  const el = document.getElementById('now-playing');
+  if (!el) return;
+  if (!name) { el.textContent = who || ''; return; }
+  el.innerHTML = `Now playing (${coloredUsername(who)}): <strong>${escapeHtml(name)}</strong>`;
+}
+
+function clearNowPlaying() {
+  const el = document.getElementById('now-playing');
+  if (el) el.textContent = '';
+  const seekRow = document.getElementById('seek-row');
+  if (seekRow) seekRow.hidden = true;
+  const seekBar = window.__seekBar;
+  if (seekBar) seekBar.value = 0;
+  const seekTime = window.__seekTimeEl;
+  if (seekTime) seekTime.textContent = '0:00 / 0:00';
+  if (joined) {
+    updateParticipantsList();
+    updateSkipButton();
+  }
+}
+
+function setPlayingState(playing) {
+  window.__isPlaying = playing;
+  updateSkipButton();
+}
+
+function stopPlayback() {
+  const audio = document.getElementById('html-audio');
+  if (audio) { audio.pause(); audio.removeAttribute('src'); }
+  if (window.__scWidget) window.__scWidget.pause();
+  if (ytPlayer && ytReady) try { ytPlayer.stopVideo(); } catch { /* noop */ }
+  if (window.__scSeekInterval) { clearInterval(window.__scSeekInterval); window.__scSeekInterval = null; }
+  if (window.__ytSeekInterval) { clearInterval(window.__ytSeekInterval); window.__ytSeekInterval = null; }
 }
 
 function handleRemotePlay(data) {
   const { type, url, positionMs = 0, atTimestamp, username: who, queue: queueFromServer, name } = data || {};
   if (!url) return;
+
   if (Array.isArray(queueFromServer)) {
     window.__queue = queueFromServer;
     if (joined) updateQueueList();
   }
+
   window.__currentSharer = who || null;
-  if (window.__scSeekInterval) {
-    clearInterval(window.__scSeekInterval);
-    window.__scSeekInterval = null;
-  }
+  stopPlayback();
   setNowPlaying(who || 'someone', name || trackName(url));
   window.__currentTrack = { type, url };
+
   if (joined) {
     updateParticipantsList();
-    updateSkipButtonVisibility();
+    updateSkipButton();
   }
-  let playUrl = url;
+
   if (type === 'file') {
     const audio = document.getElementById('html-audio');
     if (!audio) return;
-    const doPlay = () => {
-      audio.src = playUrl;
+    scheduleAt(atTimestamp || Date.now(), () => {
+      audio.src = url;
       audio.currentTime = (positionMs || 0) / 1000;
       audio.play().catch((err) => setNowPlaying(`Playback error: ${err.message}`));
       setPlayingState(true);
-    };
-    scheduleAt(atTimestamp || Date.now(), doPlay);
-  }
-  if (type === 'soundcloud') {
+    });
+  } else if (type === 'soundcloud') {
     window.__pendingSoundCloud = { url, positionMs, atTimestamp, who };
     if (window.SC && window.__scWidget) {
       applySoundCloudPlay(window.__scWidget, { url, positionMs, atTimestamp });
     }
+  } else if (type === 'youtube') {
+    const videoId = getYouTubeVideoId(url);
+    if (!videoId) return;
+    initYouTubePlayer().then((player) => {
+      if (!player) return;
+      scheduleAt(atTimestamp || Date.now(), () => {
+        player.loadVideoById({ videoId, startSeconds: (positionMs || 0) / 1000 });
+        setPlayingState(true);
+        startYouTubeSeekUpdates();
+        const vol = Number(document.getElementById('volume-slider')?.value ?? 100);
+        player.setVolume(vol);
+      });
+    });
   }
 }
 
@@ -190,7 +418,7 @@ function applySoundCloudPlay(widget, { url, positionMs, atTimestamp }) {
     scheduleAt(atTimestamp || Date.now(), () => {
       widget.seekTo(positionMs || 0);
       const vol = Number(document.getElementById('volume-slider')?.value ?? 100);
-      if (window.__scWidget) window.__scWidget.setVolume(Math.round(vol));
+      widget.setVolume(Math.round(vol));
       widget.play();
       setPlayingState(true);
       startSoundCloudSeekUpdates(widget);
@@ -228,6 +456,9 @@ function handleRemoteSeek(data) {
     window.__scWidget.seekTo(positionMs);
     window.__scWidget.play();
   }
+  if (ytPlayer && ytReady && !isNaN(positionMs)) {
+    try { ytPlayer.seekTo(positionMs / 1000, true); } catch { /* noop */ }
+  }
 }
 
 function updateSeekBar(audio) {
@@ -242,13 +473,190 @@ function updateSeekBar(audio) {
   timeEl.textContent = `${formatTime(t)} / ${formatTime(d)}`;
 }
 
-function formatTime(seconds) {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
+function applyVolume(valuePercent) {
+  const v = Math.max(0, Math.min(100, valuePercent)) / 100;
+  const audio = document.getElementById('html-audio');
+  if (audio) audio.volume = v;
+  if (window.__scWidget) window.__scWidget.setVolume(Math.round(valuePercent));
+  if (ytPlayer && ytReady) try { ytPlayer.setVolume(valuePercent); } catch { /* noop */ }
+  saveVolume(valuePercent);
 }
 
-// ─── UI rendering ───
+function localSeek(positionMs) {
+  const audio = document.getElementById('html-audio');
+  if (audio && !isNaN(positionMs)) audio.currentTime = positionMs / 1000;
+  if (window.__scWidget && !isNaN(positionMs)) window.__scWidget.seekTo(positionMs);
+  if (ytPlayer && ytReady && !isNaN(positionMs)) try { ytPlayer.seekTo(positionMs / 1000, true); } catch { /* noop */ }
+}
+
+// ─── Handle play (user action) ───
+
+async function handlePlay(url) {
+  if (!url) return;
+  if (!socket || !joined) return;
+
+  let type;
+  let name;
+  let playUrl = url;
+
+  if (isSoundCloudUrl(url)) {
+    type = 'soundcloud';
+    name = trackName(url);
+  } else if (isYouTubeUrl(url)) {
+    type = 'youtube';
+    name = await fetchYouTubeTitle(url);
+  } else if (isGoogleDriveUrl(url)) {
+    playUrl = getGoogleDriveProxyUrl(url);
+    type = 'file';
+    name = 'Google Drive audio';
+  } else {
+    type = 'file';
+    name = trackName(url);
+  }
+
+  socket.emit('play', { type, url: playUrl, positionMs: 0, name });
+
+  // #1 Clear input after queuing
+  const input = document.getElementById('audio-url');
+  if (input) input.value = '';
+
+  // #2 Toast feedback
+  const queueLen = (window.__queue || []).length;
+  if (queueLen > 0) {
+    showToast(`Added to queue (#${queueLen + 1})`, 'success');
+  } else {
+    showToast('Now playing!', 'success');
+  }
+}
+
+// ─── UI: Join screen ───
+
+function renderJoin() {
+  const savedName = loadUsername();
+  const roomFromUrl = getRoomFromUrl();
+  const roomDisplay = roomFromUrl || '';
+
+  app.innerHTML = `
+    <div class="join-screen">
+      <h1>SoundShare</h1>
+      <p class="tagline">Synchronized audio for your group</p>
+      <form id="join-form" class="join-form">
+        <input type="text" id="username" placeholder="Your name" maxlength="32" required autofocus value="${escapeHtml(savedName)}" />
+        <input type="text" id="room-input" placeholder="Room code (leave blank for lobby)" maxlength="32" value="${escapeHtml(roomDisplay)}" />
+        <button type="submit">Join</button>
+      </form>
+      <p id="join-error" class="error" aria-live="polite"></p>
+    </div>
+  `;
+
+  document.getElementById('join-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const nameInput = document.getElementById('username');
+    const roomInput = document.getElementById('room-input');
+    const name = (nameInput.value || '').trim();
+    if (!name) {
+      document.getElementById('join-error').textContent = 'Enter a name.';
+      return;
+    }
+    username = name;
+    saveUsername(name);
+    const roomId = (roomInput.value || '').trim() || null;
+    connectAndJoin(name, roomId);
+  });
+}
+
+// ─── UI: Lobby layout ───
+
+function renderLobby(room) {
+  const roomLabel = room && room !== 'lobby' ? room : 'lobby';
+  const shareUrl = room && room !== 'lobby'
+    ? `${window.location.origin}${window.location.pathname}#${room}`
+    : '';
+  const vol = loadVolume();
+
+  app.innerHTML = `
+    <header class="lobby-header">
+      <div class="lobby-title-row">
+        <h1>SoundShare</h1>
+        <span class="room-badge" title="Room code">${escapeHtml(roomLabel)}</span>
+      </div>
+      <div class="lobby-meta">
+        <span class="you">You: <strong>${coloredUsername(username)}</strong></span>
+        ${shareUrl ? `<button type="button" class="btn-copy-link" id="btn-copy-link" title="Copy room link">Copy link</button>` : ''}
+      </div>
+    </header>
+
+    <div class="lobby-grid">
+      <section class="participants">
+        <h2>Participants</h2>
+        <ul id="participants-list"></ul>
+      </section>
+
+      <section class="player-section">
+        <h2>Queue audio</h2>
+        <p class="player-hint">Paste a SoundCloud, YouTube, Google Drive, or direct audio URL.</p>
+        <div class="url-row">
+          <input type="url" id="audio-url" placeholder="Paste URL and press Enter or click Queue" />
+          <button type="button" id="btn-queue">Queue</button>
+          <button type="button" id="btn-skip" class="btn-skip" title="Only the current sharer can skip" disabled>Skip</button>
+        </div>
+        <p id="now-playing" class="now-playing" aria-live="polite"></p>
+        <div class="seek-row" id="seek-row" hidden>
+          <input type="range" id="seek-bar" min="0" max="100" value="0" />
+          <span id="seek-time">0:00 / 0:00</span>
+        </div>
+        <div class="volume-row">
+          <label for="volume-slider">\uD83D\uDD0A</label>
+          <input type="range" id="volume-slider" min="0" max="100" value="${vol}" />
+        </div>
+        <div class="queue-section" id="queue-section">
+          <h3>Queue</h3>
+          <p class="queue-empty">No tracks queued.</p>
+        </div>
+        <div class="history-section" id="history-section"></div>
+      </section>
+
+      <section class="chat-section" id="chat-section">
+        <h2>Chat</h2>
+        <div class="reaction-bar" id="reaction-bar">
+          <button type="button" class="reaction-btn" data-emoji="\uD83D\uDC4D">\uD83D\uDC4D</button>
+          <button type="button" class="reaction-btn" data-emoji="\uD83D\uDD25">\uD83D\uDD25</button>
+          <button type="button" class="reaction-btn" data-emoji="\uD83D\uDC80">\uD83D\uDC80</button>
+          <button type="button" class="reaction-btn" data-emoji="\u2764\uFE0F">\u2764\uFE0F</button>
+          <button type="button" class="reaction-btn" data-emoji="\uD83C\uDFB6">\uD83C\uDFB6</button>
+          <button type="button" class="reaction-btn" data-emoji="\uD83D\uDE02">\uD83D\uDE02</button>
+        </div>
+        <div class="chat-messages" id="chat-messages"></div>
+        <div class="chat-input-row">
+          <input type="text" id="chat-input" placeholder="Type a message\u2026" maxlength="500" />
+          <button type="button" id="btn-chat-send">Send</button>
+        </div>
+      </section>
+    </div>
+
+    <audio id="html-audio" preload="auto"></audio>
+    <div id="soundcloud-container" class="soundcloud-container" hidden></div>
+    <div id="youtube-container" class="youtube-container" hidden></div>
+  `;
+
+  updateParticipantsList();
+  updateQueueList();
+  updateHistoryList();
+  renderChatHistory();
+  updateSkipButton();
+  bindPlayerHandlers();
+  bindChatHandlers();
+  initSoundCloudWidget();
+  applyVolume(vol);
+
+  if (shareUrl) {
+    document.getElementById('btn-copy-link')?.addEventListener('click', () => {
+      navigator.clipboard.writeText(shareUrl).then(() => showToast('Link copied!', 'success'));
+    });
+  }
+}
+
+// ─── UI: Participants ───
 
 function updateParticipantsList() {
   const el = document.getElementById('participants-list');
@@ -260,31 +668,84 @@ function updateParticipantsList() {
   }).join('');
 }
 
+// ─── UI: Skip button (#4 — always visible, disabled for non-sharers) ───
+
+function updateSkipButton() {
+  const btn = document.getElementById('btn-skip');
+  if (!btn) return;
+  const isSharer = username === (window.__currentSharer || null);
+  const isPlaying = window.__isPlaying;
+  btn.disabled = !(isSharer && isPlaying);
+  btn.title = isSharer ? 'Skip current track' : 'Only the current sharer can skip';
+}
+
+// ─── UI: Queue (#3 position numbers, #6 remove button, #8 auto-scroll) ───
+
 function updateQueueList() {
   const container = document.getElementById('queue-section');
   if (!container) return;
-  if (dragState) return; // don't re-render during local drag
+  if (dragState) return;
   const queue = window.__queue || [];
+
   if (queue.length === 0) {
     container.innerHTML = '<h3>Queue</h3><p class="queue-empty">No tracks queued.</p>';
     return;
   }
+
   const nowPlaying = queue[0];
   const upNext = queue.slice(1);
+
   let html = '<h3>Queue</h3><ul id="queue-list" class="queue-list">';
-  html += `<li class="queue-item queue-item-now" data-index="0"><span class="queue-label">Now playing</span> ${coloredUsername(nowPlaying.username)}: <strong>${escapeHtml(nowPlaying.name || trackName(nowPlaying.url))}</strong></li>`;
+  html += `<li class="queue-item queue-item-now" data-index="0">
+    <span class="queue-pos">\u25B6</span>
+    <span class="queue-info">
+      <span class="queue-track-name">${escapeHtml(nowPlaying.name || trackName(nowPlaying.url))}</span>
+      <span class="queue-meta">${coloredUsername(nowPlaying.username)}</span>
+    </span>
+  </li>`;
+
   upNext.forEach((item, i) => {
     const idx = i + 1;
-    const label = i === 0 ? '<span class="queue-label">Next</span> ' : '';
-    const cls = i === 0 ? 'queue-item queue-item-next queue-item-draggable' : 'queue-item queue-item-draggable';
-    html += `<li class="${cls}" data-index="${idx}"><span class="drag-handle" title="Drag to reorder">\u2630</span>${label}${coloredUsername(item.username)}: ${escapeHtml(item.name || trackName(item.url))}</li>`;
+    const isOwn = item.username === username;
+    html += `<li class="queue-item queue-item-draggable" data-index="${idx}">
+      <span class="drag-handle" title="Drag to reorder">\u2630</span>
+      <span class="queue-pos">${idx + 1}</span>
+      <span class="queue-info">
+        <span class="queue-track-name">${escapeHtml(item.name || trackName(item.url))}</span>
+        <span class="queue-meta">${coloredUsername(item.username)}</span>
+      </span>
+      ${isOwn ? `<button type="button" class="btn-queue-remove" data-index="${idx}" title="Remove from queue">\u2715</button>` : ''}
+    </li>`;
   });
+
   html += '</ul>';
   container.innerHTML = html;
   bindQueueDragHandlers();
+  bindQueueRemoveHandlers();
+  scrollQueueIntoView();
 }
 
-// ─── Drag-and-drop queue reordering ───
+function bindQueueRemoveHandlers() {
+  document.querySelectorAll('.btn-queue-remove').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const index = parseInt(btn.dataset.index, 10);
+      if (socket && joined && index >= 1) {
+        socket.emit('queue_remove', { index });
+        showToast('Removed from queue', 'info');
+      }
+    });
+  });
+}
+
+function scrollQueueIntoView() {
+  const list = document.getElementById('queue-list');
+  if (!list) return;
+  const lastItem = list.lastElementChild;
+  if (lastItem) lastItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// ─── UI: Queue drag & drop ───
 
 let dragState = null;
 
@@ -309,9 +770,7 @@ function startDrag(item, startEvent) {
 
   const allItems = [...list.querySelectorAll('.queue-item-draggable')];
   const rects = new Map();
-  allItems.forEach(el => {
-    rects.set(parseInt(el.dataset.index, 10), el.getBoundingClientRect());
-  });
+  allItems.forEach(el => rects.set(parseInt(el.dataset.index, 10), el.getBoundingClientRect()));
   const itemRect = item.getBoundingClientRect();
   const itemH = itemRect.height;
 
@@ -328,16 +787,7 @@ function startDrag(item, startEvent) {
   item.classList.add('queue-item-dragging');
   allItems.forEach(el => el.style.transition = 'transform 150ms ease');
 
-  dragState = {
-    fromIndex,
-    currentHover: fromIndex,
-    ghost,
-    item,
-    allItems,
-    rects,
-    itemH,
-    offsetY: startEvent.clientY - itemRect.top,
-  };
+  dragState = { fromIndex, currentHover: fromIndex, ghost, item, allItems, rects, itemH, offsetY: startEvent.clientY - itemRect.top };
 
   let lastEmit = 0;
   const THROTTLE = 60;
@@ -346,44 +796,15 @@ function startDrag(item, startEvent) {
     if (!dragState) return;
     dragState.ghost.style.top = (e.clientY - dragState.offsetY) + 'px';
 
+    const indices = dragState.allItems.map(el => parseInt(el.dataset.index, 10)).sort((a, b) => a - b);
     let hoverIndex = dragState.fromIndex;
-    for (const el of dragState.allItems) {
-      const idx = parseInt(el.dataset.index, 10);
-      if (idx === dragState.fromIndex) continue;
-      const r = dragState.rects.get(idx);
-      if (!r) continue;
-      const midY = r.top + r.height / 2;
-      if (e.clientY < midY && idx < hoverIndex) hoverIndex = idx;
-      if (e.clientY > midY && idx > hoverIndex) hoverIndex = idx;
-    }
-
-    // More robust: find closest gap
-    const indices = dragState.allItems
-      .map(el => parseInt(el.dataset.index, 10))
-      .filter(i => i !== dragState.fromIndex)
-      .sort((a, b) => a - b);
-    let bestIdx = dragState.fromIndex;
     let bestDist = Infinity;
     for (const idx of indices) {
       const r = dragState.rects.get(idx);
       if (!r) continue;
       const midY = r.top + r.height / 2;
       const dist = Math.abs(e.clientY - midY);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestIdx = idx;
-        if (e.clientY > midY) bestIdx = idx;
-      }
-    }
-    // Determine insertion point
-    const targetR = dragState.rects.get(bestIdx);
-    if (targetR) {
-      const midY = targetR.top + targetR.height / 2;
-      if (e.clientY < midY && bestIdx < dragState.fromIndex) hoverIndex = bestIdx;
-      else if (e.clientY >= midY && bestIdx > dragState.fromIndex) hoverIndex = bestIdx;
-      else if (e.clientY < midY && bestIdx > dragState.fromIndex) hoverIndex = bestIdx;
-      else if (e.clientY >= midY && bestIdx < dragState.fromIndex) hoverIndex = bestIdx;
-      else hoverIndex = bestIdx;
+      if (dist < bestDist) { bestDist = dist; hoverIndex = idx; }
     }
     hoverIndex = Math.max(1, hoverIndex);
 
@@ -402,17 +823,13 @@ function startDrag(item, startEvent) {
     if (!dragState) return;
     document.removeEventListener('pointermove', onMove);
     document.removeEventListener('pointerup', onUp);
-
     const { fromIndex: f, currentHover: t, ghost: g, item: it, allItems: all } = dragState;
     g.remove();
     it.classList.remove('queue-item-dragging');
     all.forEach(el => { el.style.transform = ''; el.style.transition = ''; });
     dragState = null;
-
     if (socket && joined) socket.emit('queue_drag_end');
-    if (f !== t && socket && joined) {
-      socket.emit('queue_reorder', { fromIndex: f, toIndex: t });
-    }
+    if (f !== t && socket && joined) socket.emit('queue_reorder', { fromIndex: f, toIndex: t });
   };
 
   document.addEventListener('pointermove', onMove);
@@ -426,11 +843,8 @@ function applyDragTransforms(fromIndex, hoverIndex) {
     const idx = parseInt(el.dataset.index, 10);
     if (idx === fromIndex) return;
     let shift = 0;
-    if (fromIndex < hoverIndex) {
-      if (idx > fromIndex && idx <= hoverIndex) shift = -itemH;
-    } else {
-      if (idx >= hoverIndex && idx < fromIndex) shift = itemH;
-    }
+    if (fromIndex < hoverIndex && idx > fromIndex && idx <= hoverIndex) shift = -itemH;
+    else if (fromIndex > hoverIndex && idx >= hoverIndex && idx < fromIndex) shift = itemH;
     el.style.transform = shift ? `translateY(${shift}px)` : '';
   });
 }
@@ -447,17 +861,12 @@ function applyRemoteDragPreview(data) {
     el.style.transition = 'transform 150ms ease';
     if (idx === fromIndex) {
       el.classList.add('queue-item-remote-dragging');
-      let targetShift = 0;
-      if (hoverIndex > fromIndex) targetShift = (hoverIndex - fromIndex) * itemH;
-      else if (hoverIndex < fromIndex) targetShift = (hoverIndex - fromIndex) * itemH;
+      const targetShift = (hoverIndex - fromIndex) * itemH;
       el.style.transform = targetShift ? `translateY(${targetShift}px)` : '';
     } else {
       let shift = 0;
-      if (fromIndex < hoverIndex) {
-        if (idx > fromIndex && idx <= hoverIndex) shift = -itemH;
-      } else {
-        if (idx >= hoverIndex && idx < fromIndex) shift = itemH;
-      }
+      if (fromIndex < hoverIndex && idx > fromIndex && idx <= hoverIndex) shift = -itemH;
+      else if (fromIndex > hoverIndex && idx >= hoverIndex && idx < fromIndex) shift = itemH;
       el.style.transform = shift ? `translateY(${shift}px)` : '';
     }
   });
@@ -473,88 +882,126 @@ function clearRemoteDragPreview() {
   });
 }
 
-// ─── Lobby layout ───
+// ─── UI: History (#12) ───
 
-function renderLobby() {
-  app.innerHTML = `
-    <header class="lobby-header">
-      <h1>SoundShare</h1>
-      <p class="you">You: <strong>${escapeHtml(username)}</strong></p>
-    </header>
-    <section class="participants">
-      <h2>In the lobby</h2>
-      <ul id="participants-list"></ul>
-    </section>
-    <section class="player-section">
-      <h2>Queue audio</h2>
-      <p>Paste a SoundCloud link, a shared Google Drive file link, or a direct URL to an audio file (mp3, wav, etc.).</p>
-      <div class="url-row">
-        <input type="url" id="audio-url" placeholder="SoundCloud, Google Drive, or direct audio URL (mp3, wav\u2026)" />
-        <button type="button" id="btn-queue">Queue</button>
-        <button type="button" id="btn-skip" class="btn-skip" title="Skip current track" hidden>Skip</button>
-      </div>
-      <p id="now-playing" class="now-playing" aria-live="polite"></p>
-      <div class="queue-section" id="queue-section">
-        <h3>Queue</h3>
-        <p class="queue-empty">No tracks queued.</p>
-      </div>
-      <div class="seek-row" id="seek-row" hidden>
-        <input type="range" id="seek-bar" min="0" max="100" value="0" />
-        <span id="seek-time">0:00 / 0:00</span>
-      </div>
-      <div class="volume-row">
-        <label for="volume-slider">Volume</label>
-        <input type="range" id="volume-slider" min="0" max="100" value="100" />
-      </div>
-    </section>
-    <audio id="html-audio" preload="auto"></audio>
-    <div id="soundcloud-container" class="soundcloud-container" hidden></div>
-  `;
-  updateParticipantsList();
-  updateQueueList();
-  updateSkipButtonVisibility();
-  bindPlayerHandlers();
-  initSoundCloudWidget();
-  applyVolume(100);
+function updateHistoryList() {
+  const container = document.getElementById('history-section');
+  if (!container) return;
+  const history = window.__history || [];
+  if (history.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+
+  let html = `<details class="history-details">
+    <summary>Previously played (${history.length})</summary>
+    <ul class="history-list">`;
+
+  [...history].reverse().forEach((item) => {
+    html += `<li class="history-item">
+      <span class="history-track">${escapeHtml(item.name || trackName(item.url))}</span>
+      <span class="history-meta">${coloredUsername(item.username)}</span>
+      <button type="button" class="btn-requeue" data-url="${escapeHtml(item.url)}" data-type="${escapeHtml(item.type)}" data-name="${escapeHtml(item.name || '')}" title="Re-queue this track">\u21BB</button>
+    </li>`;
+  });
+
+  html += '</ul></details>';
+  container.innerHTML = html;
+
+  container.querySelectorAll('.btn-requeue').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!socket || !joined) return;
+      const { url, type, name } = btn.dataset;
+      socket.emit('play', { type, url, positionMs: 0, name: name || null });
+      showToast('Re-queued!', 'success');
+    });
+  });
 }
 
-function updateSkipButtonVisibility() {
-  const btn = document.getElementById('btn-skip');
-  if (!btn) return;
-  const isSharer = username === (window.__currentSharer || null);
-  const isPlaying = window.__isPlaying;
-  btn.hidden = !(isSharer && isPlaying);
+// ─── UI: Chat (#11) ───
+
+function renderChatHistory() {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  container.innerHTML = '';
+  (window.__chatMessages || []).forEach(entry => appendChatMessage(entry, false));
+  container.scrollTop = container.scrollHeight;
 }
 
-function applyVolume(valuePercent) {
-  const v = Math.max(0, Math.min(100, valuePercent)) / 100;
-  const audio = document.getElementById('html-audio');
-  if (audio) audio.volume = v;
-  if (window.__scWidget) window.__scWidget.setVolume(Math.round(valuePercent));
+function appendChatMessage(entry, scroll = true) {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+
+  const div = document.createElement('div');
+  div.className = entry.type === 'reaction' ? 'chat-msg chat-reaction' : 'chat-msg';
+
+  if (entry.type === 'reaction') {
+    div.innerHTML = `${coloredUsername(entry.username)} ${escapeHtml(entry.message)}`;
+  } else {
+    div.innerHTML = `<span class="chat-author">${coloredUsername(entry.username)}</span> ${escapeHtml(entry.message)}`;
+  }
+  container.appendChild(div);
+  if (scroll) container.scrollTop = container.scrollHeight;
 }
+
+function sendChat() {
+  const input = document.getElementById('chat-input');
+  if (!input || !socket || !joined) return;
+  const msg = input.value.trim();
+  if (!msg) return;
+  socket.emit('chat_message', { message: msg, type: 'message' });
+  input.value = '';
+}
+
+function bindChatHandlers() {
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('btn-chat-send');
+  if (input) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
+    });
+  }
+  if (btn) btn.addEventListener('click', sendChat);
+
+  document.querySelectorAll('.reaction-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      if (!socket || !joined) return;
+      socket.emit('chat_message', { message: b.dataset.emoji, type: 'reaction' });
+    });
+  });
+}
+
+// ─── UI: Player controls ───
 
 function bindPlayerHandlers() {
   const btnQueue = document.getElementById('btn-queue');
   const urlInput = document.getElementById('audio-url');
+
   if (btnQueue && urlInput) {
     btnQueue.addEventListener('click', () => handlePlay(urlInput.value.trim()));
   }
+
+  // #5 Enter key to queue
+  if (urlInput) {
+    urlInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); handlePlay(urlInput.value.trim()); }
+    });
+  }
+
   const btnSkip = document.getElementById('btn-skip');
   if (btnSkip) {
     btnSkip.addEventListener('click', () => {
       if (!socket || !joined || username !== window.__currentSharer) return;
       stopPlayback();
       setPlayingState(false);
-      if (window.__scSeekInterval) {
-        clearInterval(window.__scSeekInterval);
-        window.__scSeekInterval = null;
-      }
       socket.emit('track_ended');
     });
   }
+
   const seekBar = document.getElementById('seek-bar');
   const seekRow = document.getElementById('seek-row');
   const audio = document.getElementById('html-audio');
+
   if (audio) {
     audio.addEventListener('durationchange', () => {
       window.__durationMs = audio.duration * 1000;
@@ -570,6 +1017,7 @@ function bindPlayerHandlers() {
       }
     });
   }
+
   if (seekBar) {
     seekBar.addEventListener('input', () => {
       const positionMs = (seekBar.value / 100) * (window.__durationMs || 0);
@@ -577,6 +1025,7 @@ function bindPlayerHandlers() {
       if (socket && joined && username === window.__currentSharer) socket.emit('seek', { positionMs });
     });
   }
+
   window.__seekBar = seekBar || window.__seekBar;
   window.__seekRow = seekRow || window.__seekRow;
   window.__seekTimeEl = document.getElementById('seek-time') || window.__seekTimeEl;
@@ -587,62 +1036,7 @@ function bindPlayerHandlers() {
   }
 }
 
-function localSeek(positionMs) {
-  const audio = document.getElementById('html-audio');
-  if (audio && !isNaN(positionMs)) audio.currentTime = positionMs / 1000;
-  if (window.__scWidget && !isNaN(positionMs)) window.__scWidget.seekTo(positionMs);
-}
-
-function stopPlayback() {
-  const audio = document.getElementById('html-audio');
-  if (audio) audio.pause();
-  if (window.__scWidget) window.__scWidget.pause();
-}
-
-function handlePlay(url) {
-  if (!url) return;
-  if (!socket || !joined) return;
-  const name = trackName(url);
-  let type;
-  if (isSoundCloudUrl(url)) {
-    type = 'soundcloud';
-  } else if (isGoogleDriveUrl(url)) {
-    url = getGoogleDriveProxyUrl(url);
-    type = 'file';
-  } else {
-    type = 'file';
-  }
-  socket.emit('play', { type, url, positionMs: 0, name });
-}
-
-function isSoundCloudUrl(url) {
-  try {
-    const u = new URL(url);
-    return u.hostname === 'soundcloud.com' || u.hostname === 'www.soundcloud.com';
-  } catch {
-    return false;
-  }
-}
-
-function isGoogleDriveUrl(url) {
-  try {
-    const u = new URL(url);
-    return u.hostname === 'drive.google.com' && /\/file\/d\/([^/]+)/.test(u.pathname);
-  } catch {
-    return false;
-  }
-}
-
-function getGoogleDriveFileId(shareUrl) {
-  const match = shareUrl.match(/\/file\/d\/([^/]+)/);
-  return match ? match[1] : null;
-}
-
-function getGoogleDriveProxyUrl(shareUrl) {
-  const id = getGoogleDriveFileId(shareUrl);
-  if (!id) return shareUrl;
-  return `/api/audio-proxy?id=${encodeURIComponent(id)}`;
-}
+// ─── SoundCloud widget ───
 
 function initSoundCloudWidget() {
   const container = document.getElementById('soundcloud-container');
@@ -664,29 +1058,23 @@ function initSoundCloudWidget() {
       window.__scWidget = SC.Widget(iframe);
       window.__scWidget.bind(window.SC.Widget.Events.FINISH, () => {
         setPlayingState(false);
-        if (window.__scSeekInterval) {
-          clearInterval(window.__scSeekInterval);
-          window.__scSeekInterval = null;
-        }
+        if (window.__scSeekInterval) { clearInterval(window.__scSeekInterval); window.__scSeekInterval = null; }
         if (socket && joined && username === window.__currentSharer && window.__currentTrack?.type === 'soundcloud') {
           socket.emit('track_ended');
         }
       });
       if (window.__pendingSoundCloud) {
-        const p = window.__pendingSoundCloud;
-        applySoundCloudPlay(window.__scWidget, p);
+        applySoundCloudPlay(window.__scWidget, window.__pendingSoundCloud);
         window.__pendingSoundCloud = null;
       }
       return true;
-    } catch (e) {
-      return false;
-    }
+    } catch { return false; }
   }
   if (!attachWidget()) {
-    const t = setInterval(() => {
-      if (attachWidget()) clearInterval(t);
-    }, 100);
+    const t = setInterval(() => { if (attachWidget()) clearInterval(t); }, 100);
   }
 }
+
+// ─── Init ───
 
 renderJoin();

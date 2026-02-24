@@ -16,6 +16,8 @@ const io = new Server(httpServer, {
   cors: isProd ? undefined : { origin: 'http://localhost:5173', methods: ['GET', 'POST'] },
 });
 
+// ─── HTTP routes ───
+
 app.get('/api/audio-proxy', async (req, res) => {
   const id = req.query.id;
   if (!id || typeof id !== 'string') {
@@ -27,20 +29,14 @@ app.get('/api/audio-proxy', async (req, res) => {
 
   try {
     let resp = await tryUrl(`https://drive.usercontent.google.com/download?id=${encodeURIComponent(id)}&export=download&confirm=t`);
-    if (!resp.ok) {
-      res.status(resp.status).send('Upstream error');
-      return;
-    }
+    if (!resp.ok) { res.status(resp.status).send('Upstream error'); return; }
     let contentType = resp.headers.get('content-type') || 'audio/mpeg';
     if (contentType.includes('text/html')) {
       const html = await resp.text();
       const confirmMatch = html.match(/confirm=([0-9A-Za-z_-]+)/);
       const token = confirmMatch ? confirmMatch[1] : 't';
       resp = await tryUrl(`https://drive.google.com/uc?export=download&confirm=${encodeURIComponent(token)}&id=${encodeURIComponent(id)}`);
-      if (!resp.ok) {
-        res.status(resp.status).send('Upstream error');
-        return;
-      }
+      if (!resp.ok) { res.status(resp.status).send('Upstream error'); return; }
       contentType = resp.headers.get('content-type') || 'audio/mpeg';
       if (contentType.includes('text/html')) {
         res.status(502).send('Google Drive returned a page instead of a file. Ensure the file is shared with "Anyone with the link" and try again.');
@@ -55,6 +51,22 @@ app.get('/api/audio-proxy', async (req, res) => {
   }
 });
 
+app.get('/api/youtube-title', async (req, res) => {
+  const url = req.query.url;
+  if (!url || typeof url !== 'string') { res.json({ title: 'YouTube video' }); return; }
+  try {
+    const resp = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`);
+    if (resp.ok) {
+      const data = await resp.json();
+      res.json({ title: data.title || 'YouTube video' });
+    } else {
+      res.json({ title: 'YouTube video' });
+    }
+  } catch {
+    res.json({ title: 'YouTube video' });
+  }
+});
+
 if (isProd) {
   const clientDist = path.join(__dirname, '..', 'client', 'dist');
   app.use(express.static(clientDist));
@@ -63,10 +75,17 @@ if (isProd) {
   });
 }
 
+// ─── In-memory state ───
+
 const DEFAULT_ROOM = 'lobby';
+const MAX_CHAT = 200;
+const MAX_HISTORY = 50;
+
 const participants = new Map();
 const roomQueue = new Map();
 const roomColors = new Map();
+const roomChat = new Map();
+const roomHistory = new Map();
 
 // WCAG AA 4.5:1+ contrast on #1a1a2e background
 const COLOR_PALETTE = [
@@ -75,6 +94,8 @@ const COLOR_PALETTE = [
   '#F48FB1', '#90CAF9', '#FFF176', '#80CBC4',
   '#FFAB91', '#B39DDB', '#C5E1A5', '#EF9A9A',
 ];
+
+// ─── Helpers ───
 
 function assignColor(room, username) {
   const key = room || DEFAULT_ROOM;
@@ -89,7 +110,7 @@ function assignColor(room, username) {
 }
 
 function getRoomParticipants(room) {
-  const roomSockets = [...io.sockets.adapter.rooms.get(room) || []];
+  const roomSockets = [...(io.sockets.adapter.rooms.get(room) || [])];
   return roomSockets.map((id) => {
     const s = io.sockets.sockets.get(id);
     const uname = s?.username || id;
@@ -107,6 +128,31 @@ function getQueueSnapshot(room) {
   return getQueue(room).map(({ type, url, username, name }) => ({ type, url, username, name }));
 }
 
+function getChat(room) {
+  const key = room || DEFAULT_ROOM;
+  if (!roomChat.has(key)) roomChat.set(key, []);
+  return roomChat.get(key);
+}
+
+function getHistory(room) {
+  const key = room || DEFAULT_ROOM;
+  if (!roomHistory.has(key)) roomHistory.set(key, []);
+  return roomHistory.get(key);
+}
+
+function addToHistory(room, item) {
+  if (!item) return;
+  const history = getHistory(room);
+  history.push({
+    type: item.type,
+    url: item.url,
+    username: item.username,
+    name: item.name,
+    playedAt: Date.now(),
+  });
+  if (history.length > MAX_HISTORY) history.shift();
+}
+
 function logQueue(label, room) {
   const q = getQueue(room);
   console.log(`[QUEUE ${label}] room="${room || DEFAULT_ROOM}" length=${q.length} items=${JSON.stringify(q.map(i => i.url.slice(-30)))}`);
@@ -115,15 +161,19 @@ function logQueue(label, room) {
 function emitQueue(room) {
   const key = room || DEFAULT_ROOM;
   const snapshot = getQueueSnapshot(room);
-  console.log(`[QUEUE emitQueue] room="${key}" snapshot.length=${snapshot.length}`);
   io.to(key).emit('queue', { queue: snapshot });
+}
+
+function emitHistory(room) {
+  const key = room || DEFAULT_ROOM;
+  io.to(key).emit('history', { history: getHistory(room) });
 }
 
 function startNextInQueue(room) {
   const key = room || DEFAULT_ROOM;
   const queue = getQueue(room);
   if (queue.length === 0) {
-    console.log(`[QUEUE startNext] room="${key}" queue empty, nothing to start`);
+    io.to(key).emit('queue_empty');
     return;
   }
   const atTimestamp = Date.now();
@@ -142,6 +192,15 @@ function startNextInQueue(room) {
   });
 }
 
+function clearRoomData(room) {
+  roomQueue.delete(room);
+  roomChat.delete(room);
+  roomHistory.delete(room);
+  roomColors.delete(room);
+}
+
+// ─── Socket handlers ───
+
 io.on('connection', (socket) => {
   socket.on('join', (payload) => {
     const { username, roomId } = payload || {};
@@ -151,16 +210,23 @@ io.on('connection', (socket) => {
     socket.room = room;
     participants.set(socket.id, { username: name, room });
     socket.join(room);
-    const names = getRoomParticipants(room);
-    io.to(room).emit('participants', { participants: names });
-    socket.emit('joined', { username: name, room, queue: getQueueSnapshot(room) });
+
+    const pList = getRoomParticipants(room);
+    io.to(room).emit('participants', { participants: pList });
+
+    socket.emit('joined', {
+      username: name,
+      room,
+      queue: getQueueSnapshot(room),
+      history: getHistory(room),
+      chat: getChat(room),
+    });
   });
 
   socket.on('play', (payload) => {
     const room = socket.room || DEFAULT_ROOM;
     const atTimestamp = Date.now();
     const isResume = Number(payload.positionMs) > 0;
-    console.log(`[EVENT play] user=${socket.username} room=${room} url="${(payload.url||'').slice(-30)}" positionMs=${payload.positionMs} isResume=${isResume}`);
     if (isResume) {
       io.to(room).emit('play', { ...payload, atTimestamp, username: socket.username });
       return;
@@ -168,7 +234,6 @@ io.on('connection', (socket) => {
     const queue = getQueue(room);
     const previousLength = queue.length;
     queue.push({ type: payload.type, url: payload.url, username: socket.username, name: payload.name || null });
-    console.log(`[EVENT play] previousLength=${previousLength} newLength=${queue.length} → ${previousLength === 0 ? 'STARTING playback' : 'QUEUED (no playback change)'}`);
     logQueue('after push', room);
     emitQueue(room);
     if (previousLength === 0) {
@@ -179,16 +244,26 @@ io.on('connection', (socket) => {
   socket.on('track_ended', () => {
     const room = socket.room || DEFAULT_ROOM;
     const queue = getQueue(room);
-    console.log(`[EVENT track_ended] user=${socket.username} room=${room} queueLen=${queue.length} front=${queue[0]?.username || 'EMPTY'}`);
-    if (queue.length === 0 || queue[0].username !== socket.username) {
-      console.log(`[EVENT track_ended] IGNORED (empty queue or user mismatch)`);
-      return;
-    }
+    if (queue.length === 0 || queue[0].username !== socket.username) return;
+    const finished = queue[0];
+    addToHistory(room, finished);
     queue.shift();
-    console.log(`[EVENT track_ended] shifted queue, newLen=${queue.length}`);
     logQueue('after shift', room);
     emitQueue(room);
+    emitHistory(room);
     if (queue.length > 0) startNextInQueue(room);
+    else io.to(room).emit('queue_empty');
+  });
+
+  socket.on('queue_remove', (payload) => {
+    const { index } = payload || {};
+    const room = socket.room || DEFAULT_ROOM;
+    const queue = getQueue(room);
+    if (index < 1 || index >= queue.length) return;
+    if (queue[index].username !== socket.username) return;
+    queue.splice(index, 1);
+    logQueue('after remove', room);
+    emitQueue(room);
   });
 
   socket.on('queue_reorder', (payload) => {
@@ -199,7 +274,6 @@ io.on('connection', (socket) => {
     if (fromIndex === toIndex) return;
     const [item] = queue.splice(fromIndex, 1);
     queue.splice(toIndex, 0, item);
-    console.log(`[QUEUE reorder] room="${room}" from=${fromIndex} to=${toIndex}`);
     logQueue('after reorder', room);
     emitQueue(room);
   });
@@ -223,25 +297,43 @@ io.on('connection', (socket) => {
     io.to(room).emit('seek', { ...payload, username: socket.username });
   });
 
+  socket.on('chat_message', (payload) => {
+    const { message, type: msgType } = payload || {};
+    if (!message || typeof message !== 'string') return;
+    const room = socket.room || DEFAULT_ROOM;
+    const chat = getChat(room);
+    const entry = {
+      username: socket.username,
+      message: message.slice(0, 500),
+      timestamp: Date.now(),
+      color: assignColor(room, socket.username),
+      type: msgType === 'reaction' ? 'reaction' : 'message',
+    };
+    chat.push(entry);
+    if (chat.length > MAX_CHAT) chat.shift();
+    io.to(room).emit('chat', entry);
+  });
+
   socket.on('disconnect', () => {
-    console.log(`[EVENT disconnect] user=${socket.username} room=${socket.room}`);
     participants.delete(socket.id);
     const room = socket.room || DEFAULT_ROOM;
-    if (room) {
-      socket.to(room).emit('queue_preview_end');
-      const roomSockets = io.sockets.adapter.rooms.get(room);
-      const roomEmpty = !roomSockets || roomSockets.size === 0;
-      if (roomEmpty) {
-        console.log(`[EVENT disconnect] room "${room}" is now empty, clearing queue`);
-        roomQueue.delete(room);
-      } else {
-        const queue = getQueue(room);
-        if (queue.length > 0 && queue[0].username === socket.username) {
-          console.log(`[EVENT disconnect] user was sharer, shifting queue`);
-          queue.shift();
-          emitQueue(room);
-          if (queue.length > 0) startNextInQueue(room);
-        }
+    if (!room) return;
+
+    socket.to(room).emit('queue_preview_end');
+    const roomSockets = io.sockets.adapter.rooms.get(room);
+    const roomEmpty = !roomSockets || roomSockets.size === 0;
+
+    if (roomEmpty) {
+      clearRoomData(room);
+    } else {
+      const queue = getQueue(room);
+      if (queue.length > 0 && queue[0].username === socket.username) {
+        addToHistory(room, queue[0]);
+        queue.shift();
+        emitQueue(room);
+        emitHistory(room);
+        if (queue.length > 0) startNextInQueue(room);
+        else io.to(room).emit('queue_empty');
       }
       const pList = getRoomParticipants(room);
       io.to(room).emit('participants', { participants: pList });
