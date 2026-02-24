@@ -668,11 +668,12 @@ body {
   background: #8b2e2e;
 }
 
-/* ─── Mobile responsive (#14) ─── */
+/* ─── Mobile responsive ─── */
 
 @media (max-width: 600px) {
   body {
-    padding: 0.5rem;
+    padding: 1rem;
+    padding: 1rem max(1rem, env(safe-area-inset-right)) 1rem max(1rem, env(safe-area-inset-left));
   }
 
   #app {
@@ -680,7 +681,7 @@ body {
   }
 
   .join-screen {
-    padding: 2rem 0.5rem;
+    padding: 2rem 0.25rem;
   }
 
   .lobby-title-row {
@@ -691,49 +692,134 @@ body {
     font-size: 1.2rem;
   }
 
+  /* Stack URL input above buttons, full-width */
   .url-row {
     flex-direction: column;
   }
 
   .url-row input {
     width: 100%;
+    font-size: 16px; /* prevents iOS zoom on focus */
+    padding: 0.6rem 0.75rem;
   }
 
   .url-row button {
     width: 100%;
+    min-height: 44px; /* Apple HIG minimum tap target */
+    font-size: 1rem;
   }
 
-  .queue-track-name {
+  /* Larger queue items for easier tapping */
+  .queue-list .queue-item {
+    padding: 0.6rem 0.6rem;
+    gap: 0.6rem;
+    min-height: 52px;
+  }
+
+  .drag-handle {
+    font-size: 1.2rem;
+    min-width: 28px;
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .btn-queue-remove {
+    font-size: 1.1rem;
+    min-width: 36px;
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .queue-pos {
+    width: 1.6rem;
     font-size: 0.85rem;
   }
 
-  .chat-messages {
-    max-height: 160px;
+  .queue-track-name {
+    font-size: 0.9rem;
   }
 
-  .reaction-bar {
-    gap: 0.2rem;
+  .queue-meta {
+    font-size: 0.8rem;
+  }
+
+  /* History items need larger tap targets too */
+  .history-item {
+    padding: 0.4rem 0.5rem;
+    min-height: 44px;
+  }
+
+  .btn-requeue {
+    min-width: 36px;
+    min-height: 36px;
+    font-size: 1.2rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Chat */
+  .chat-messages {
+    max-height: 180px;
+  }
+
+  .chat-input-row input {
+    font-size: 16px; /* prevents iOS zoom on focus */
+    padding: 0.55rem 0.65rem;
+  }
+
+  #btn-chat-send {
+    min-height: 44px;
+    padding: 0.5rem 1rem;
   }
 
   .reaction-btn {
-    padding: 0.2rem 0.35rem;
-    font-size: 0.95rem;
+    min-width: 40px;
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.15rem;
   }
 
+  /* Volume slider full width */
   .volume-row input[type="range"] {
     max-width: 100%;
+  }
+
+  /* Seek bar a bit taller for touch */
+  .seek-row input[type="range"] {
+    height: 28px;
+  }
+
+  .join-form input {
+    font-size: 16px; /* prevents iOS zoom */
+    padding: 0.7rem 0.85rem;
+  }
+
+  .join-form button {
+    min-height: 44px;
+    font-size: 1rem;
+  }
+
+  .player-hint {
+    font-size: 0.8rem;
   }
 }
 
 @media (max-width: 380px) {
+  body {
+    padding: 0.75rem;
+  }
+
   .lobby-meta {
     flex-direction: column;
     align-items: flex-start;
     gap: 0.3rem;
-  }
-
-  .queue-item {
-    font-size: 0.8rem;
   }
 
   .chat-input-row {
@@ -742,5 +828,10 @@ body {
 
   #btn-chat-send {
     width: 100%;
+  }
+
+  .queue-list .queue-item {
+    gap: 0.4rem;
+    padding: 0.5rem;
   }
 }
