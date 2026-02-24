@@ -211,8 +211,6 @@ function initYouTubePlayer() {
 
 function startYouTubeSeekUpdates() {
   if (window.__ytSeekInterval) clearInterval(window.__ytSeekInterval);
-  const seekRow = document.getElementById('seek-row');
-  if (seekRow) seekRow.hidden = false;
   window.__ytSeekInterval = setInterval(() => {
     if (!ytPlayer || !ytReady) return;
     try {
@@ -299,6 +297,7 @@ function connectAndJoin(name, roomId) {
 
   socket.on('play', (data) => handleRemotePlay(data));
   socket.on('seek', (data) => handleRemoteSeek(data));
+  socket.on('pause', () => handleRemotePause());
 
   socket.on('queue_preview', (data) => {
     if (joined && !dragState) applyRemoteDragPreview(data);
@@ -327,31 +326,17 @@ function applyParticipants(list) {
 
 // ─── Playback engine ───
 
-function setNowPlaying(who, name) {
-  const el = document.getElementById('now-playing');
-  if (!el) return;
-  if (!name) { el.textContent = who || ''; return; }
-  el.innerHTML = `Now playing (${coloredUsername(who)}): <strong>${escapeHtml(name)}</strong>`;
-}
-
 function clearNowPlaying() {
-  const el = document.getElementById('now-playing');
-  if (el) el.textContent = '';
-  const seekRow = document.getElementById('seek-row');
-  if (seekRow) seekRow.hidden = true;
-  const seekBar = window.__seekBar;
-  if (seekBar) seekBar.value = 0;
-  const seekTime = window.__seekTimeEl;
-  if (seekTime) seekTime.textContent = '0:00 / 0:00';
+  window.__durationMs = 0;
   if (joined) {
+    updateQueueList();
     updateParticipantsList();
-    updateSkipButton();
   }
 }
 
 function setPlayingState(playing) {
   window.__isPlaying = playing;
-  updateSkipButton();
+  updatePlayerControls();
 }
 
 function stopPlayback() {
@@ -363,13 +348,50 @@ function stopPlayback() {
   if (window.__ytSeekInterval) { clearInterval(window.__ytSeekInterval); window.__ytSeekInterval = null; }
 }
 
+function pausePlayback() {
+  const audio = document.getElementById('html-audio');
+  if (audio && !audio.paused) audio.pause();
+  if (window.__scWidget) window.__scWidget.pause();
+  if (ytPlayer && ytReady) try { ytPlayer.pauseVideo(); } catch { /* noop */ }
+}
+
+function resumePlayback() {
+  const type = window.__currentTrack?.type;
+  if (type === 'file') {
+    const audio = document.getElementById('html-audio');
+    if (audio) audio.play().catch(() => {});
+  } else if (type === 'soundcloud') {
+    if (window.__scWidget) window.__scWidget.play();
+  } else if (type === 'youtube') {
+    if (ytPlayer && ytReady) try { ytPlayer.playVideo(); } catch { /* noop */ }
+  }
+}
+
+function getCurrentPositionMs() {
+  const type = window.__currentTrack?.type;
+  if (type === 'file') {
+    const audio = document.getElementById('html-audio');
+    if (audio && isFinite(audio.currentTime)) return Math.round(audio.currentTime * 1000);
+  } else if (type === 'soundcloud') {
+    // SC widget is async, so we use the last known seek bar value
+    return Math.round((window.__seekBar?.value || 0) / 100 * (window.__durationMs || 0));
+  } else if (type === 'youtube') {
+    if (ytPlayer && ytReady) try { return Math.round(ytPlayer.getCurrentTime() * 1000); } catch { /* noop */ }
+  }
+  return 0;
+}
+
+function handleRemotePause() {
+  pausePlayback();
+  setPlayingState(false);
+  updatePlayerControls();
+}
+
 function resetSeekBar() {
   const seekBar = window.__seekBar || document.getElementById('seek-bar');
   const seekTime = window.__seekTimeEl || document.getElementById('seek-time');
-  const seekRow = document.getElementById('seek-row');
   if (seekBar) seekBar.value = 0;
   if (seekTime) seekTime.textContent = '0:00 / 0:00';
-  if (seekRow) seekRow.hidden = true;
   window.__durationMs = 0;
 }
 
@@ -385,12 +407,11 @@ function handleRemotePlay(data) {
   window.__currentSharer = who || null;
   stopPlayback();
   resetSeekBar();
-  setNowPlaying(who || 'someone', name || trackName(url));
   window.__currentTrack = { type, url };
 
   if (joined) {
+    updateQueueList();
     updateParticipantsList();
-    updateSkipButton();
   }
 
   if (type === 'file') {
@@ -399,7 +420,7 @@ function handleRemotePlay(data) {
     scheduleAt(atTimestamp || Date.now(), () => {
       audio.src = url;
       audio.currentTime = (positionMs || 0) / 1000;
-      audio.play().catch((err) => setNowPlaying(`Playback error: ${err.message}`));
+      audio.play().catch(() => {});
       setPlayingState(true);
     });
   } else if (type === 'soundcloud') {
@@ -439,8 +460,6 @@ function applySoundCloudPlay(widget, { url, positionMs, atTimestamp }) {
 
 function startSoundCloudSeekUpdates(widget) {
   if (window.__scSeekInterval) clearInterval(window.__scSeekInterval);
-  const seekRow = document.getElementById('seek-row');
-  if (seekRow) seekRow.hidden = false;
   window.__scSeekInterval = setInterval(() => {
     if (!widget) return;
     widget.getDuration((d) => {
@@ -609,21 +628,8 @@ function renderLobby(room) {
         <div class="url-row">
           <input type="url" id="audio-url" placeholder="Paste URL and press Enter or click Queue" />
           <button type="button" id="btn-queue">Queue</button>
-          <button type="button" id="btn-skip" class="btn-skip" title="Only the current sharer can skip" disabled>Skip</button>
         </div>
-        <p id="now-playing" class="now-playing" aria-live="polite"></p>
-        <div class="seek-row" id="seek-row" hidden>
-          <input type="range" id="seek-bar" min="0" max="100" value="0" />
-          <span id="seek-time">0:00 / 0:00</span>
-        </div>
-        <div class="volume-row">
-          <label for="volume-slider">\uD83D\uDD0A</label>
-          <input type="range" id="volume-slider" min="0" max="100" value="${vol}" />
-        </div>
-        <div class="queue-section" id="queue-section">
-          <h3>Queue</h3>
-          <p class="queue-empty">No tracks queued.</p>
-        </div>
+        <div class="queue-section" id="queue-section"></div>
         <div class="history-section" id="history-section"></div>
       </section>
 
@@ -654,7 +660,6 @@ function renderLobby(room) {
   updateQueueList();
   updateHistoryList();
   renderChatHistory();
-  updateSkipButton();
   bindPlayerHandlers();
   bindChatHandlers();
   initSoundCloudWidget();
@@ -679,61 +684,146 @@ function updateParticipantsList() {
   }).join('');
 }
 
-// ─── UI: Skip button (#4 — always visible, disabled for non-sharers) ───
+// ─── UI: Player controls ───
 
-function updateSkipButton() {
-  const btn = document.getElementById('btn-skip');
-  if (!btn) return;
+function updatePlayerControls() {
+  const btnPause = document.getElementById('btn-pause');
+  const btnSkip = document.getElementById('btn-skip');
   const isSharer = username === (window.__currentSharer || null);
-  const isPlaying = window.__isPlaying;
-  btn.disabled = !(isSharer && isPlaying);
-  btn.title = isSharer ? 'Skip current track' : 'Only the current sharer can skip';
+  const playing = window.__isPlaying;
+
+  if (btnPause) {
+    btnPause.disabled = !isSharer;
+    btnPause.textContent = playing ? '\u275A\u275A' : '\u25B6';
+    btnPause.title = isSharer
+      ? (playing ? 'Pause for everyone' : 'Resume for everyone')
+      : 'Only the sharer can pause';
+  }
+  if (btnSkip) {
+    btnSkip.disabled = !(isSharer && (playing || window.__currentTrack));
+    btnSkip.title = isSharer ? 'Skip to next track' : 'Only the sharer can skip';
+  }
 }
 
-// ─── UI: Queue (#3 position numbers, #6 remove button, #8 auto-scroll) ───
+// ─── UI: Queue with player card ───
 
 function updateQueueList() {
   const container = document.getElementById('queue-section');
   if (!container) return;
   if (dragState) return;
   const queue = window.__queue || [];
+  const vol = loadVolume();
 
-  if (queue.length === 0) {
-    container.innerHTML = '<h3>Queue</h3><p class="queue-empty">No tracks queued.</p>';
-    return;
+  let html = '';
+
+  // Player card — always rendered
+  if (queue.length > 0) {
+    const np = queue[0];
+    const seekVal = window.__seekBar?.value || 0;
+    const seekTime = window.__seekTimeEl?.textContent || '0:00 / 0:00';
+    html += `<div class="now-playing-card" id="now-playing-card">
+      <div class="npc-top">
+        <button type="button" id="btn-pause" class="npc-btn npc-btn-pause" title="Pause">\u275A\u275A</button>
+        <div class="npc-info">
+          <span class="npc-track">${escapeHtml(np.name || trackName(np.url))}</span>
+          <span class="npc-meta">queued by ${coloredUsername(np.username)}</span>
+        </div>
+        <button type="button" id="btn-skip" class="npc-btn npc-btn-skip" title="Skip">\u23ED</button>
+      </div>
+      <div class="npc-seek">
+        <input type="range" id="seek-bar" min="0" max="100" value="${seekVal}" />
+        <span id="seek-time" class="npc-time">${seekTime}</span>
+      </div>
+      <div class="npc-volume">
+        <span class="npc-vol-icon">\uD83D\uDD0A</span>
+        <input type="range" id="volume-slider" min="0" max="100" value="${vol}" />
+      </div>
+    </div>`;
+  } else {
+    html += `<div class="now-playing-card now-playing-card-empty">
+      <span class="npc-empty-text">No track playing</span>
+    </div>`;
   }
 
-  const nowPlaying = queue[0];
+  // Up next list
   const upNext = queue.slice(1);
+  if (upNext.length > 0) {
+    html += '<h3 class="queue-up-next-heading">Up next</h3><ul id="queue-list" class="queue-list">';
+    upNext.forEach((item, i) => {
+      const idx = i + 1;
+      const isOwn = item.username === username;
+      html += `<li class="queue-item queue-item-draggable" data-index="${idx}">
+        <span class="drag-handle" title="Drag to reorder">\u2630</span>
+        <span class="queue-pos">${idx + 1}</span>
+        <span class="queue-info">
+          <span class="queue-track-name">${escapeHtml(item.name || trackName(item.url))}</span>
+          <span class="queue-meta">${coloredUsername(item.username)}</span>
+        </span>
+        ${isOwn ? `<button type="button" class="btn-queue-remove" data-index="${idx}" title="Remove from queue">\u2715</button>` : ''}
+      </li>`;
+    });
+    html += '</ul>';
+  }
 
-  let html = '<h3>Queue</h3><ul id="queue-list" class="queue-list">';
-  html += `<li class="queue-item queue-item-now" data-index="0">
-    <span class="queue-pos">\u25B6</span>
-    <span class="queue-info">
-      <span class="queue-track-name">${escapeHtml(nowPlaying.name || trackName(nowPlaying.url))}</span>
-      <span class="queue-meta">${coloredUsername(nowPlaying.username)}</span>
-    </span>
-  </li>`;
-
-  upNext.forEach((item, i) => {
-    const idx = i + 1;
-    const isOwn = item.username === username;
-    html += `<li class="queue-item queue-item-draggable" data-index="${idx}">
-      <span class="drag-handle" title="Drag to reorder">\u2630</span>
-      <span class="queue-pos">${idx + 1}</span>
-      <span class="queue-info">
-        <span class="queue-track-name">${escapeHtml(item.name || trackName(item.url))}</span>
-        <span class="queue-meta">${coloredUsername(item.username)}</span>
-      </span>
-      ${isOwn ? `<button type="button" class="btn-queue-remove" data-index="${idx}" title="Remove from queue">\u2715</button>` : ''}
-    </li>`;
-  });
-
-  html += '</ul>';
   container.innerHTML = html;
+
+  // Re-bind references for seek/volume
+  window.__seekBar = document.getElementById('seek-bar');
+  window.__seekTimeEl = document.getElementById('seek-time');
+
+  // Bind card controls
+  bindCardControls();
   bindQueueDragHandlers();
   bindQueueRemoveHandlers();
-  scrollQueueIntoView();
+  updatePlayerControls();
+  if (upNext.length > 0) scrollQueueIntoView();
+}
+
+function bindCardControls() {
+  const btnPause = document.getElementById('btn-pause');
+  const btnSkip = document.getElementById('btn-skip');
+  const seekBar = document.getElementById('seek-bar');
+  const volumeSlider = document.getElementById('volume-slider');
+
+  if (btnPause) {
+    btnPause.addEventListener('click', () => {
+      if (!socket || !joined || username !== window.__currentSharer) return;
+      if (window.__isPlaying) {
+        socket.emit('pause');
+      } else {
+        const positionMs = getCurrentPositionMs();
+        resumePlayback();
+        setPlayingState(true);
+        updatePlayerControls();
+        socket.emit('play', {
+          type: window.__currentTrack?.type,
+          url: window.__currentTrack?.url,
+          positionMs,
+        });
+      }
+    });
+  }
+
+  if (btnSkip) {
+    btnSkip.addEventListener('click', () => {
+      if (!socket || !joined || username !== window.__currentSharer) return;
+      stopPlayback();
+      setPlayingState(false);
+      socket.emit('track_ended');
+    });
+  }
+
+  if (seekBar) {
+    seekBar.addEventListener('input', () => {
+      const positionMs = (seekBar.value / 100) * (window.__durationMs || 0);
+      localSeek(positionMs);
+      if (socket && joined && username === window.__currentSharer) socket.emit('seek', { positionMs });
+    });
+  }
+
+  if (volumeSlider) {
+    volumeSlider.addEventListener('input', () => applyVolume(Number(volumeSlider.value)));
+  }
 }
 
 function bindQueueRemoveHandlers() {
@@ -982,7 +1072,7 @@ function bindChatHandlers() {
   });
 }
 
-// ─── UI: Player controls ───
+// ─── UI: Player controls (queue button + audio element events) ───
 
 function bindPlayerHandlers() {
   const btnQueue = document.getElementById('btn-queue');
@@ -992,31 +1082,16 @@ function bindPlayerHandlers() {
     btnQueue.addEventListener('click', () => handlePlay(urlInput.value.trim()));
   }
 
-  // #5 Enter key to queue
   if (urlInput) {
     urlInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); handlePlay(urlInput.value.trim()); }
     });
   }
 
-  const btnSkip = document.getElementById('btn-skip');
-  if (btnSkip) {
-    btnSkip.addEventListener('click', () => {
-      if (!socket || !joined || username !== window.__currentSharer) return;
-      stopPlayback();
-      setPlayingState(false);
-      socket.emit('track_ended');
-    });
-  }
-
-  const seekBar = document.getElementById('seek-bar');
-  const seekRow = document.getElementById('seek-row');
   const audio = document.getElementById('html-audio');
-
   if (audio) {
     audio.addEventListener('durationchange', () => {
       window.__durationMs = audio.duration * 1000;
-      if (seekRow) seekRow.hidden = false;
       updateSeekBar(audio);
     });
     audio.addEventListener('timeupdate', () => updateSeekBar(audio));
@@ -1027,23 +1102,6 @@ function bindPlayerHandlers() {
         socket.emit('track_ended');
       }
     });
-  }
-
-  if (seekBar) {
-    seekBar.addEventListener('input', () => {
-      const positionMs = (seekBar.value / 100) * (window.__durationMs || 0);
-      localSeek(positionMs);
-      if (socket && joined && username === window.__currentSharer) socket.emit('seek', { positionMs });
-    });
-  }
-
-  window.__seekBar = seekBar || window.__seekBar;
-  window.__seekRow = seekRow || window.__seekRow;
-  window.__seekTimeEl = document.getElementById('seek-time') || window.__seekTimeEl;
-
-  const volumeSlider = document.getElementById('volume-slider');
-  if (volumeSlider) {
-    volumeSlider.addEventListener('input', () => applyVolume(Number(volumeSlider.value)));
   }
 }
 

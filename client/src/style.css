@@ -235,26 +235,141 @@ body {
   background: #5a8c69;
 }
 
-.btn-skip {
-  background: #555;
-  color: #fff;
-  transition: opacity 0.15s;
+/* ─── Now-playing card ─── */
+
+.now-playing-card {
+  background: linear-gradient(135deg, rgba(110, 231, 183, 0.08), rgba(74, 124, 89, 0.12));
+  border: 1px solid rgba(110, 231, 183, 0.18);
+  border-radius: 10px;
+  padding: 0.75rem 0.85rem;
+  margin-bottom: 0.75rem;
 }
 
-.btn-skip:hover:not(:disabled) {
-  background: #666;
+.now-playing-card-empty {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed #333;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60px;
 }
 
-.btn-skip:disabled {
-  opacity: 0.35;
+.npc-empty-text {
+  color: #555;
+  font-size: 0.9rem;
+  font-style: italic;
+}
+
+.npc-top {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.npc-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.npc-btn:disabled {
+  opacity: 0.3;
   cursor: not-allowed;
 }
 
-.now-playing {
-  font-size: 0.9rem;
-  color: #aaa;
-  margin: 0 0 0.5rem;
-  word-break: break-word;
+.npc-btn-pause {
+  background: #4a7c59;
+  color: #fff;
+  font-size: 0.75rem;
+  letter-spacing: -1px;
+}
+
+.npc-btn-pause:hover:not(:disabled) {
+  background: #5a8c69;
+}
+
+.npc-btn-skip {
+  background: #444;
+  color: #ccc;
+  font-size: 1rem;
+}
+
+.npc-btn-skip:hover:not(:disabled) {
+  background: #555;
+  color: #fff;
+}
+
+.npc-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.npc-track {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.npc-meta {
+  font-size: 0.8rem;
+  color: #888;
+}
+
+.npc-seek {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.npc-seek input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: #6ee7b7;
+  height: 4px;
+}
+
+.npc-time {
+  font-size: 0.78rem;
+  color: #888;
+  white-space: nowrap;
+  min-width: 5.5rem;
+  text-align: right;
+}
+
+.npc-volume {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+
+.npc-vol-icon {
+  font-size: 0.85rem;
+  color: #777;
+  flex-shrink: 0;
+}
+
+.npc-volume input[type="range"] {
+  flex: 1;
+  min-width: 3rem;
+  max-width: 7rem;
+  accent-color: #4a7c59;
+  height: 3px;
 }
 
 /* ─── Queue ─── */
@@ -263,11 +378,13 @@ body {
   margin: 0.75rem 0 0;
 }
 
-.queue-section h3 {
-  font-size: 0.95rem;
+.queue-up-next-heading {
+  font-size: 0.85rem;
   font-weight: 600;
-  color: #888;
-  margin: 0 0 0.35rem;
+  color: #666;
+  margin: 0 0 0.3rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .queue-list {
@@ -297,11 +414,6 @@ body {
   font-weight: 600;
 }
 
-.queue-item-now .queue-pos {
-  color: #6ee7b7;
-  font-size: 0.7rem;
-}
-
 .queue-info {
   flex: 1;
   min-width: 0;
@@ -321,10 +433,6 @@ body {
 .queue-meta {
   font-size: 0.8rem;
   color: #777;
-}
-
-.queue-item-now {
-  background: rgba(110, 231, 183, 0.06);
 }
 
 .queue-empty {
@@ -401,46 +509,6 @@ body {
   opacity: 0.7;
 }
 
-/* ─── Seek & Volume ─── */
-
-.seek-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.5rem;
-}
-
-.seek-row input[type="range"] {
-  flex: 1;
-  min-width: 0;
-  accent-color: #4a7c59;
-}
-
-#seek-time {
-  font-size: 0.85rem;
-  color: #888;
-  white-space: nowrap;
-}
-
-.volume-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-}
-
-.volume-row label {
-  font-size: 1rem;
-  color: #888;
-  cursor: default;
-}
-
-.volume-row input[type="range"] {
-  flex: 1;
-  min-width: 4rem;
-  max-width: 8rem;
-  accent-color: #4a7c59;
-}
 
 /* ─── History ─── */
 
@@ -786,14 +854,18 @@ body {
     font-size: 1.15rem;
   }
 
-  /* Volume slider full width */
-  .volume-row input[type="range"] {
-    max-width: 100%;
+  /* Player card on mobile */
+  .now-playing-card {
+    padding: 0.65rem 0.7rem;
   }
 
-  /* Seek bar a bit taller for touch */
-  .seek-row input[type="range"] {
-    height: 28px;
+  .npc-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  .npc-volume input[type="range"] {
+    max-width: 100%;
   }
 
   .join-form input {

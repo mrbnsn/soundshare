@@ -292,6 +292,13 @@ io.on('connection', (socket) => {
     socket.to(room).emit('queue_preview_end');
   });
 
+  socket.on('pause', () => {
+    const room = socket.room || DEFAULT_ROOM;
+    const queue = getQueue(room);
+    if (queue.length === 0 || queue[0].username !== socket.username) return;
+    io.to(room).emit('pause', { username: socket.username });
+  });
+
   socket.on('seek', (payload) => {
     const room = socket.room || DEFAULT_ROOM;
     io.to(room).emit('seek', { ...payload, username: socket.username });
