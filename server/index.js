@@ -65,10 +65,55 @@ if (isProd) {
 
 const DEFAULT_ROOM = 'lobby';
 const participants = new Map();
+const roomQueue = new Map();
 
 function getRoomParticipants(room) {
   const roomSockets = [...io.sockets.adapter.rooms.get(room) || []];
   return roomSockets.map((id) => io.sockets.sockets.get(id)?.username || id);
+}
+
+function getQueue(room) {
+  const key = room || DEFAULT_ROOM;
+  if (!roomQueue.has(key)) roomQueue.set(key, []);
+  return roomQueue.get(key);
+}
+
+function getQueueSnapshot(room) {
+  return getQueue(room).map(({ type, url, username }) => ({ type, url, username }));
+}
+
+function logQueue(label, room) {
+  const q = getQueue(room);
+  console.log(`[QUEUE ${label}] room="${room || DEFAULT_ROOM}" length=${q.length} items=${JSON.stringify(q.map(i => i.url.slice(-30)))}`);
+}
+
+function emitQueue(room) {
+  const key = room || DEFAULT_ROOM;
+  const snapshot = getQueueSnapshot(room);
+  console.log(`[QUEUE emitQueue] room="${key}" snapshot.length=${snapshot.length}`);
+  io.to(key).emit('queue', { queue: snapshot });
+}
+
+function startNextInQueue(room) {
+  const key = room || DEFAULT_ROOM;
+  const queue = getQueue(room);
+  if (queue.length === 0) {
+    console.log(`[QUEUE startNext] room="${key}" queue empty, nothing to start`);
+    return;
+  }
+  const atTimestamp = Date.now();
+  const item = queue[0];
+  const queueSnapshot = getQueueSnapshot(room);
+  console.log(`[QUEUE startNext] room="${key}" playing: "${item.url.slice(-30)}" by ${item.username}, queueLen=${queue.length}`);
+  io.to(key).emit('queue', { queue: queueSnapshot });
+  io.to(key).emit('play', {
+    type: item.type,
+    url: item.url,
+    positionMs: 0,
+    atTimestamp,
+    username: item.username,
+    queue: queueSnapshot,
+  });
 }
 
 io.on('connection', (socket) => {
@@ -82,33 +127,61 @@ io.on('connection', (socket) => {
     socket.join(room);
     const names = getRoomParticipants(room);
     io.to(room).emit('participants', { participants: names });
-    socket.emit('joined', { username: name, room });
+    socket.emit('joined', { username: name, room, queue: getQueueSnapshot(room) });
   });
 
   socket.on('play', (payload) => {
-    if (!socket.room) return;
+    const room = socket.room || DEFAULT_ROOM;
     const atTimestamp = Date.now();
-    io.to(socket.room).emit('play', {
-      ...payload,
-      atTimestamp,
-      username: socket.username,
-    });
+    const isResume = Number(payload.positionMs) > 0;
+    console.log(`[EVENT play] user=${socket.username} room=${room} url="${(payload.url||'').slice(-30)}" positionMs=${payload.positionMs} isResume=${isResume}`);
+    if (isResume) {
+      io.to(room).emit('play', { ...payload, atTimestamp, username: socket.username });
+      return;
+    }
+    const queue = getQueue(room);
+    const previousLength = queue.length;
+    queue.push({ type: payload.type, url: payload.url, username: socket.username });
+    console.log(`[EVENT play] previousLength=${previousLength} newLength=${queue.length} → ${previousLength === 0 ? 'STARTING playback' : 'QUEUED (no playback change)'}`);
+    logQueue('after push', room);
+    emitQueue(room);
+    if (previousLength === 0) {
+      startNextInQueue(room);
+    }
   });
 
-  socket.on('pause', () => {
-    if (!socket.room) return;
-    io.to(socket.room).emit('pause', { username: socket.username });
+  socket.on('track_ended', () => {
+    const room = socket.room || DEFAULT_ROOM;
+    const queue = getQueue(room);
+    console.log(`[EVENT track_ended] user=${socket.username} room=${room} queueLen=${queue.length} front=${queue[0]?.username || 'EMPTY'}`);
+    if (queue.length === 0 || queue[0].username !== socket.username) {
+      console.log(`[EVENT track_ended] IGNORED (empty queue or user mismatch)`);
+      return;
+    }
+    queue.shift();
+    console.log(`[EVENT track_ended] shifted queue, newLen=${queue.length}`);
+    logQueue('after shift', room);
+    emitQueue(room);
+    if (queue.length > 0) startNextInQueue(room);
   });
 
   socket.on('seek', (payload) => {
-    if (!socket.room) return;
-    io.to(socket.room).emit('seek', { ...payload, username: socket.username });
+    const room = socket.room || DEFAULT_ROOM;
+    io.to(room).emit('seek', { ...payload, username: socket.username });
   });
 
   socket.on('disconnect', () => {
-    const { room } = socket;
+    console.log(`[EVENT disconnect] user=${socket.username} room=${socket.room}`);
     participants.delete(socket.id);
+    const room = socket.room || DEFAULT_ROOM;
     if (room) {
+      const queue = getQueue(room);
+      if (queue.length > 0 && queue[0].username === socket.username) {
+        console.log(`[EVENT disconnect] user was sharer, shifting queue`);
+        queue.shift();
+        emitQueue(room);
+        if (queue.length > 0) startNextInQueue(room);
+      }
       const names = getRoomParticipants(room);
       io.to(room).emit('participants', { participants: names });
     }

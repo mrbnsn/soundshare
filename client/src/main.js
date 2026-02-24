@@ -43,16 +43,24 @@ function connectAndJoin(name) {
   socket.on('connect', () => {
     socket.emit('join', { username: name, roomId: null });
   });
-  socket.on('joined', () => {
+  socket.on('joined', (data) => {
     joined = true;
+    window.__queue = data.queue || [];
     renderLobby();
   });
   socket.on('participants', (data) => {
     participants = data.participants || [];
     if (joined) updateParticipantsList();
   });
-  socket.on('play', (data) => handleRemotePlay(data));
-  socket.on('pause', (data) => handleRemotePause(data));
+  socket.on('queue', (data) => {
+    console.log('[SOCKET queue] received, length=', (data.queue || []).length, data.queue);
+    window.__queue = data.queue || [];
+    if (joined) updateQueueList();
+  });
+  socket.on('play', (data) => {
+    console.log('[SOCKET play] received', data.type, data.url?.slice(-30), 'from', data.username);
+    handleRemotePlay(data);
+  });
   socket.on('seek', (data) => handleRemoteSeek(data));
   socket.on('connect_error', () => {
     document.getElementById('join-error').textContent = 'Could not connect. Is the server running?';
@@ -72,8 +80,7 @@ function setNowPlaying(text) {
 
 function setPlayingState(playing) {
   window.__isPlaying = playing;
-  const btn = document.getElementById('btn-play-pause');
-  if (btn) btn.textContent = playing ? 'Pause' : 'Play';
+  updateSkipButtonVisibility();
 }
 
 function shortUrl(url) {
@@ -87,8 +94,12 @@ function shortUrl(url) {
 }
 
 function handleRemotePlay(data) {
-  const { type, url, positionMs = 0, atTimestamp, username: who } = data || {};
+  const { type, url, positionMs = 0, atTimestamp, username: who, queue: queueFromServer } = data || {};
   if (!url) return;
+  if (Array.isArray(queueFromServer)) {
+    window.__queue = queueFromServer;
+    if (joined) updateQueueList();
+  }
   window.__currentSharer = who || null;
   if (window.__scSeekInterval) {
     clearInterval(window.__scSeekInterval);
@@ -96,6 +107,10 @@ function handleRemotePlay(data) {
   }
   setNowPlaying(`Now playing (started by ${escapeHtml(who || 'someone')}): ${shortUrl(url)}`);
   window.__currentTrack = { type, url };
+  if (joined) {
+    updateParticipantsList();
+    updateSkipButtonVisibility();
+  }
   let playUrl = url;
   if (type === 'file') {
     const audio = document.getElementById('html-audio');
@@ -149,17 +164,6 @@ function startSoundCloudSeekUpdates(widget) {
   }, 300);
 }
 
-function handleRemotePause() {
-  setPlayingState(false);
-  if (window.__scSeekInterval) {
-    clearInterval(window.__scSeekInterval);
-    window.__scSeekInterval = null;
-  }
-  const audio = document.getElementById('html-audio');
-  if (audio) audio.pause();
-  if (window.__scWidget) window.__scWidget.pause();
-}
-
 function handleRemoteSeek(data) {
   const { positionMs } = data || {};
   const audio = document.getElementById('html-audio');
@@ -194,7 +198,33 @@ function formatTime(seconds) {
 function updateParticipantsList() {
   const el = document.getElementById('participants-list');
   if (!el) return;
-  el.innerHTML = participants.map((p) => `<li>${escapeHtml(p)}</li>`).join('');
+  const sharer = window.__currentSharer || null;
+  el.innerHTML = participants.map((p) => {
+    const isSharer = p === sharer;
+    return `<li${isSharer ? ' class="participant-sharer" title="Now playing"' : ''}>${escapeHtml(p)}${isSharer ? ' <span class="sharer-badge" aria-label="Now playing">▶</span>' : ''}</li>`;
+  }).join('');
+}
+
+function updateQueueList() {
+  const container = document.getElementById('queue-section');
+  if (!container) return;
+  const queue = window.__queue || [];
+  if (queue.length === 0) {
+    container.innerHTML = '<h3>Queue</h3><p class="queue-empty">No tracks queued.</p>';
+    return;
+  }
+  const nowPlaying = queue[0];
+  const upNext = queue.slice(1);
+  let html = '<h3>Queue</h3><ul id="queue-list" class="queue-list">';
+  html += `<li class="queue-item queue-item-now"><span class="queue-label">Now playing</span> ${escapeHtml(nowPlaying.username)}: ${shortUrl(nowPlaying.url)}</li>`;
+  if (upNext.length > 0) {
+    html += `<li class="queue-item queue-item-next"><span class="queue-label">Next</span> ${escapeHtml(upNext[0].username)}: ${shortUrl(upNext[0].url)}</li>`;
+    upNext.slice(1).forEach((item, i) => {
+      html += `<li class="queue-item">${escapeHtml(item.username)}: ${shortUrl(item.url)}</li>`;
+    });
+  }
+  html += '</ul>';
+  container.innerHTML = html;
 }
 
 function renderLobby() {
@@ -208,13 +238,18 @@ function renderLobby() {
       <ul id="participants-list"></ul>
     </section>
     <section class="player-section">
-      <h2>Play audio</h2>
+      <h2>Queue audio</h2>
       <p>Paste a SoundCloud link, a shared Google Drive file link, or a direct URL to an audio file (mp3, wav, etc.).</p>
       <div class="url-row">
         <input type="url" id="audio-url" placeholder="SoundCloud, Google Drive, or direct audio URL (mp3, wav…)" />
-        <button type="button" id="btn-play-pause">Play</button>
+        <button type="button" id="btn-queue">Queue</button>
+        <button type="button" id="btn-skip" class="btn-skip" title="Skip current track" hidden>Skip</button>
       </div>
       <p id="now-playing" class="now-playing" aria-live="polite"></p>
+      <div class="queue-section" id="queue-section">
+        <h3>Queue</h3>
+        <p class="queue-empty">No tracks queued.</p>
+      </div>
       <div class="seek-row" id="seek-row" hidden>
         <input type="range" id="seek-bar" min="0" max="100" value="0" />
         <span id="seek-time">0:00 / 0:00</span>
@@ -228,9 +263,19 @@ function renderLobby() {
     <div id="soundcloud-container" class="soundcloud-container" hidden></div>
   `;
   updateParticipantsList();
+  updateQueueList();
+  updateSkipButtonVisibility();
   bindPlayerHandlers();
   initSoundCloudWidget();
   applyVolume(100);
+}
+
+function updateSkipButtonVisibility() {
+  const btn = document.getElementById('btn-skip');
+  if (!btn) return;
+  const isSharer = username === (window.__currentSharer || null);
+  const isPlaying = window.__isPlaying;
+  btn.hidden = !(isSharer && isPlaying);
 }
 
 function escapeHtml(s) {
@@ -247,12 +292,23 @@ function applyVolume(valuePercent) {
 }
 
 function bindPlayerHandlers() {
-  const btnPlayPause = document.getElementById('btn-play-pause');
+  const btnQueue = document.getElementById('btn-queue');
   const urlInput = document.getElementById('audio-url');
-  if (btnPlayPause && urlInput) {
-    btnPlayPause.addEventListener('click', () => {
-      if (window.__isPlaying) handlePause();
-      else handlePlayOrResume(urlInput.value.trim());
+  if (btnQueue && urlInput) {
+    btnQueue.addEventListener('click', () => handlePlay(urlInput.value.trim()));
+  }
+  const btnSkip = document.getElementById('btn-skip');
+  if (btnSkip) {
+    btnSkip.addEventListener('click', () => {
+      if (!socket || !joined || username !== window.__currentSharer) return;
+      console.log('[SKIP] → emitting track_ended');
+      stopPlayback();
+      setPlayingState(false);
+      if (window.__scSeekInterval) {
+        clearInterval(window.__scSeekInterval);
+        window.__scSeekInterval = null;
+      }
+      socket.emit('track_ended');
     });
   }
   const seekBar = document.getElementById('seek-bar');
@@ -266,8 +322,13 @@ function bindPlayerHandlers() {
     });
     audio.addEventListener('timeupdate', () => updateSeekBar(audio));
     audio.addEventListener('ended', () => {
+      console.log('[AUDIO ended] currentTrack=', window.__currentTrack?.type, 'sharer=', window.__currentSharer, 'me=', username);
       updateSeekBar(audio);
       setPlayingState(false);
+      if (socket && joined && username === window.__currentSharer && window.__currentTrack?.type === 'file') {
+        console.log('[AUDIO ended] → emitting track_ended');
+        socket.emit('track_ended');
+      }
     });
   }
   if (seekBar) {
@@ -293,42 +354,10 @@ function localSeek(positionMs) {
   if (window.__scWidget && !isNaN(positionMs)) window.__scWidget.seekTo(positionMs);
 }
 
-function handlePlayOrResume(url) {
-  if (!socket || !joined) return;
-  const track = window.__currentTrack;
-  const isResume = !url && track && track.url;
-  if (isResume && track) {
-    if (username === window.__currentSharer) {
-      getCurrentPositionMs((positionMs) => {
-        if (positionMs != null) socket.emit('play', { type: track.type, url: track.url, positionMs });
-      });
-    } else {
-      localResume();
-      setPlayingState(true);
-    }
-    return;
-  }
-  if (!url) return;
-  handlePlay(url);
-}
-
-function localResume() {
+function stopPlayback() {
   const audio = document.getElementById('html-audio');
-  if (audio && audio.src) audio.play().catch(() => {});
-  if (window.__scWidget) window.__scWidget.play();
-}
-
-function getCurrentPositionMs(cb) {
-  const audio = document.getElementById('html-audio');
-  if (audio && audio.src && isFinite(audio.duration)) {
-    cb(audio.currentTime * 1000);
-    return;
-  }
-  if (window.__scWidget) {
-    window.__scWidget.getPosition((p) => cb(p));
-    return;
-  }
-  cb(0);
+  if (audio) audio.pause();
+  if (window.__scWidget) window.__scWidget.pause();
 }
 
 function handlePlay(url) {
@@ -343,20 +372,8 @@ function handlePlay(url) {
   } else {
     type = 'file';
   }
+  console.log('[CLIENT emit play]', type, url.slice(-30));
   socket.emit('play', { type, url, positionMs: 0 });
-}
-
-function handlePause() {
-  if (!socket || !joined) return;
-  localPause();
-  setPlayingState(false);
-  if (username === window.__currentSharer) socket.emit('pause');
-}
-
-function localPause() {
-  const audio = document.getElementById('html-audio');
-  if (audio) audio.pause();
-  if (window.__scWidget) window.__scWidget.pause();
 }
 
 function isSoundCloudUrl(url) {
@@ -412,6 +429,18 @@ function initSoundCloudWidget() {
     if (!window.SC) return false;
     try {
       window.__scWidget = SC.Widget(iframe);
+      window.__scWidget.bind(window.SC.Widget.Events.FINISH, () => {
+        console.log('[SC FINISH] currentTrack=', window.__currentTrack?.type, 'sharer=', window.__currentSharer, 'me=', username);
+        setPlayingState(false);
+        if (window.__scSeekInterval) {
+          clearInterval(window.__scSeekInterval);
+          window.__scSeekInterval = null;
+        }
+        if (socket && joined && username === window.__currentSharer && window.__currentTrack?.type === 'soundcloud') {
+          console.log('[SC FINISH] → emitting track_ended');
+          socket.emit('track_ended');
+        }
+      });
       if (window.__pendingSoundCloud) {
         const p = window.__pendingSoundCloud;
         applySoundCloudPlay(window.__scWidget, p);

@@ -113,6 +113,17 @@ body {
   margin: 0.2rem 0;
 }
 
+.participant-sharer {
+  color: #6ee7b7;
+  font-weight: 600;
+}
+
+.sharer-badge {
+  margin-left: 0.25rem;
+  font-size: 0.75rem;
+  opacity: 0.9;
+}
+
 .player-section h2 {
   font-size: 1rem;
   font-weight: 600;
@@ -157,14 +168,23 @@ body {
   cursor: pointer;
 }
 
-#btn-play-pause {
+#btn-queue {
   background: #4a7c59;
   color: #fff;
   min-width: 5rem;
 }
 
-#btn-play-pause:hover {
+#btn-queue:hover {
   background: #5a8c69;
+}
+
+.btn-skip {
+  background: #555;
+  color: #fff;
+}
+
+.btn-skip:hover {
+  background: #666;
 }
 
 .now-playing {
@@ -172,6 +192,63 @@ body {
   color: #aaa;
   margin: 0 0 0.5rem;
   word-break: break-all;
+}
+
+.queue-section {
+  margin: 0.75rem 0 0;
+}
+
+.queue-section h3 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #888;
+  margin: 0 0 0.35rem;
+}
+
+.queue-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.85rem;
+  color: #888;
+  list-style: none;
+}
+
+.queue-list .queue-item {
+  margin: 0.4rem 0;
+  word-break: break-all;
+  padding-left: 0;
+}
+
+.queue-item-now {
+  color: #aaa;
+}
+
+.queue-item-now .queue-label {
+  font-weight: 600;
+  color: #6ee7b7;
+}
+
+.queue-item-next .queue-label {
+  font-weight: 700;
+  color: #6ee7b7;
+}
+
+.queue-item-next {
+  color: #e8e8e8;
+  font-weight: 600;
+}
+
+.queue-label {
+  display: inline-block;
+  min-width: 5.5rem;
+  font-size: 0.8rem;
+}
+
+.queue-empty {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #666;
+  font-style: italic;
 }
 
 .seek-row {
