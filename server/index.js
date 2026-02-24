@@ -66,10 +66,35 @@ if (isProd) {
 const DEFAULT_ROOM = 'lobby';
 const participants = new Map();
 const roomQueue = new Map();
+const roomColors = new Map();
+
+// WCAG AA 4.5:1+ contrast on #1a1a2e background
+const COLOR_PALETTE = [
+  '#FF7F7F', '#64B5F6', '#81C784', '#FFD54F',
+  '#CE93D8', '#FFB74D', '#4DD0E1', '#AED581',
+  '#F48FB1', '#90CAF9', '#FFF176', '#80CBC4',
+  '#FFAB91', '#B39DDB', '#C5E1A5', '#EF9A9A',
+];
+
+function assignColor(room, username) {
+  const key = room || DEFAULT_ROOM;
+  if (!roomColors.has(key)) roomColors.set(key, new Map());
+  const colors = roomColors.get(key);
+  if (colors.has(username)) return colors.get(username);
+  const used = new Set(colors.values());
+  const available = COLOR_PALETTE.filter(c => !used.has(c));
+  const pick = available.length > 0 ? available : COLOR_PALETTE;
+  colors.set(username, pick[colors.size % pick.length]);
+  return colors.get(username);
+}
 
 function getRoomParticipants(room) {
   const roomSockets = [...io.sockets.adapter.rooms.get(room) || []];
-  return roomSockets.map((id) => io.sockets.sockets.get(id)?.username || id);
+  return roomSockets.map((id) => {
+    const s = io.sockets.sockets.get(id);
+    const uname = s?.username || id;
+    return { username: uname, color: assignColor(room, uname) };
+  });
 }
 
 function getQueue(room) {
@@ -79,7 +104,7 @@ function getQueue(room) {
 }
 
 function getQueueSnapshot(room) {
-  return getQueue(room).map(({ type, url, username }) => ({ type, url, username }));
+  return getQueue(room).map(({ type, url, username, name }) => ({ type, url, username, name }));
 }
 
 function logQueue(label, room) {
@@ -112,6 +137,7 @@ function startNextInQueue(room) {
     positionMs: 0,
     atTimestamp,
     username: item.username,
+    name: item.name,
     queue: queueSnapshot,
   });
 }
@@ -141,7 +167,7 @@ io.on('connection', (socket) => {
     }
     const queue = getQueue(room);
     const previousLength = queue.length;
-    queue.push({ type: payload.type, url: payload.url, username: socket.username });
+    queue.push({ type: payload.type, url: payload.url, username: socket.username, name: payload.name || null });
     console.log(`[EVENT play] previousLength=${previousLength} newLength=${queue.length} → ${previousLength === 0 ? 'STARTING playback' : 'QUEUED (no playback change)'}`);
     logQueue('after push', room);
     emitQueue(room);
@@ -165,6 +191,33 @@ io.on('connection', (socket) => {
     if (queue.length > 0) startNextInQueue(room);
   });
 
+  socket.on('queue_reorder', (payload) => {
+    const { fromIndex, toIndex } = payload || {};
+    const room = socket.room || DEFAULT_ROOM;
+    const queue = getQueue(room);
+    if (fromIndex < 1 || toIndex < 1 || fromIndex >= queue.length || toIndex >= queue.length) return;
+    if (fromIndex === toIndex) return;
+    const [item] = queue.splice(fromIndex, 1);
+    queue.splice(toIndex, 0, item);
+    console.log(`[QUEUE reorder] room="${room}" from=${fromIndex} to=${toIndex}`);
+    logQueue('after reorder', room);
+    emitQueue(room);
+  });
+
+  socket.on('queue_drag', (payload) => {
+    const room = socket.room || DEFAULT_ROOM;
+    socket.to(room).emit('queue_preview', {
+      fromIndex: payload.fromIndex,
+      hoverIndex: payload.hoverIndex,
+      username: socket.username,
+    });
+  });
+
+  socket.on('queue_drag_end', () => {
+    const room = socket.room || DEFAULT_ROOM;
+    socket.to(room).emit('queue_preview_end');
+  });
+
   socket.on('seek', (payload) => {
     const room = socket.room || DEFAULT_ROOM;
     io.to(room).emit('seek', { ...payload, username: socket.username });
@@ -175,15 +228,23 @@ io.on('connection', (socket) => {
     participants.delete(socket.id);
     const room = socket.room || DEFAULT_ROOM;
     if (room) {
-      const queue = getQueue(room);
-      if (queue.length > 0 && queue[0].username === socket.username) {
-        console.log(`[EVENT disconnect] user was sharer, shifting queue`);
-        queue.shift();
-        emitQueue(room);
-        if (queue.length > 0) startNextInQueue(room);
+      socket.to(room).emit('queue_preview_end');
+      const roomSockets = io.sockets.adapter.rooms.get(room);
+      const roomEmpty = !roomSockets || roomSockets.size === 0;
+      if (roomEmpty) {
+        console.log(`[EVENT disconnect] room "${room}" is now empty, clearing queue`);
+        roomQueue.delete(room);
+      } else {
+        const queue = getQueue(room);
+        if (queue.length > 0 && queue[0].username === socket.username) {
+          console.log(`[EVENT disconnect] user was sharer, shifting queue`);
+          queue.shift();
+          emitQueue(room);
+          if (queue.length > 0) startNextInQueue(room);
+        }
       }
-      const names = getRoomParticipants(room);
-      io.to(room).emit('participants', { participants: names });
+      const pList = getRoomParticipants(room);
+      io.to(room).emit('participants', { participants: pList });
     }
   });
 });

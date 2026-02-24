@@ -7,6 +7,9 @@ let username = '';
 let joined = false;
 let participants = [];
 
+window.__userColors = {};
+window.__queue = [];
+
 function getSocketOrigin() {
   if (import.meta.env.DEV) return undefined;
   return window.location.origin;
@@ -46,26 +49,55 @@ function connectAndJoin(name) {
   socket.on('joined', (data) => {
     joined = true;
     window.__queue = data.queue || [];
+    if (Array.isArray(data.participants)) {
+      applyParticipants(data.participants);
+    }
     renderLobby();
   });
   socket.on('participants', (data) => {
-    participants = data.participants || [];
+    applyParticipants(data.participants || []);
     if (joined) updateParticipantsList();
   });
   socket.on('queue', (data) => {
-    console.log('[SOCKET queue] received, length=', (data.queue || []).length, data.queue);
     window.__queue = data.queue || [];
     if (joined) updateQueueList();
   });
-  socket.on('play', (data) => {
-    console.log('[SOCKET play] received', data.type, data.url?.slice(-30), 'from', data.username);
-    handleRemotePlay(data);
-  });
+  socket.on('play', (data) => handleRemotePlay(data));
   socket.on('seek', (data) => handleRemoteSeek(data));
+  socket.on('queue_preview', (data) => {
+    if (joined && !dragState) applyRemoteDragPreview(data);
+  });
+  socket.on('queue_preview_end', () => {
+    if (joined) clearRemoteDragPreview();
+  });
   socket.on('connect_error', () => {
     document.getElementById('join-error').textContent = 'Could not connect. Is the server running?';
   });
 }
+
+function applyParticipants(list) {
+  participants = list.map(p => typeof p === 'string' ? p : p.username);
+  list.forEach(p => {
+    if (typeof p === 'object' && p.color) {
+      window.__userColors[p.username] = p.color;
+    }
+  });
+}
+
+// ─── Color helpers ───
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+function coloredUsername(name) {
+  const color = window.__userColors[name] || '#ccc';
+  return `<span class="username-colored" style="color:${color}">${escapeHtml(name)}</span>`;
+}
+
+// ─── Playback ───
 
 function scheduleAt(atTimestamp, fn) {
   const delay = atTimestamp - Date.now();
@@ -73,9 +105,11 @@ function scheduleAt(atTimestamp, fn) {
   else setTimeout(fn, delay);
 }
 
-function setNowPlaying(text) {
+function setNowPlaying(who, name) {
   const el = document.getElementById('now-playing');
-  if (el) el.textContent = text || '';
+  if (!el) return;
+  if (!name) { el.textContent = who || ''; return; }
+  el.innerHTML = `Now playing (${coloredUsername(who)}): <strong>${escapeHtml(name)}</strong>`;
 }
 
 function setPlayingState(playing) {
@@ -83,18 +117,37 @@ function setPlayingState(playing) {
   updateSkipButtonVisibility();
 }
 
-function shortUrl(url) {
+function capitalize(s) {
+  return s.replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function trackName(url) {
   try {
-    const u = new URL(url);
-    const path = u.pathname.length > 40 ? u.pathname.slice(0, 37) + '…' : u.pathname;
-    return u.origin + path;
-  } catch {
-    return url.length > 50 ? url.slice(0, 47) + '…' : url;
-  }
+    const u = new URL(url, window.location.origin);
+    if (u.hostname === 'soundcloud.com' || u.hostname === 'www.soundcloud.com') {
+      const parts = u.pathname.split('/').filter(Boolean);
+      if (parts.length >= 2) {
+        const track = capitalize(decodeURIComponent(parts[1]).replace(/[-_]/g, ' '));
+        const artist = capitalize(decodeURIComponent(parts[0]).replace(/[-_]/g, ' '));
+        return `${track} \u2014 ${artist}`;
+      }
+    }
+    if (u.hostname === 'drive.google.com') {
+      return 'Google Drive audio';
+    }
+    if (u.pathname === '/api/audio-proxy') {
+      return 'Google Drive audio';
+    }
+    const filename = decodeURIComponent(u.pathname.split('/').pop() || '');
+    if (filename) {
+      return filename.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ');
+    }
+  } catch { /* fall through */ }
+  return url.length > 40 ? url.slice(0, 37) + '\u2026' : url;
 }
 
 function handleRemotePlay(data) {
-  const { type, url, positionMs = 0, atTimestamp, username: who, queue: queueFromServer } = data || {};
+  const { type, url, positionMs = 0, atTimestamp, username: who, queue: queueFromServer, name } = data || {};
   if (!url) return;
   if (Array.isArray(queueFromServer)) {
     window.__queue = queueFromServer;
@@ -105,7 +158,7 @@ function handleRemotePlay(data) {
     clearInterval(window.__scSeekInterval);
     window.__scSeekInterval = null;
   }
-  setNowPlaying(`Now playing (started by ${escapeHtml(who || 'someone')}): ${shortUrl(url)}`);
+  setNowPlaying(who || 'someone', name || trackName(url));
   window.__currentTrack = { type, url };
   if (joined) {
     updateParticipantsList();
@@ -195,19 +248,22 @@ function formatTime(seconds) {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+// ─── UI rendering ───
+
 function updateParticipantsList() {
   const el = document.getElementById('participants-list');
   if (!el) return;
   const sharer = window.__currentSharer || null;
   el.innerHTML = participants.map((p) => {
     const isSharer = p === sharer;
-    return `<li${isSharer ? ' class="participant-sharer" title="Now playing"' : ''}>${escapeHtml(p)}${isSharer ? ' <span class="sharer-badge" aria-label="Now playing">▶</span>' : ''}</li>`;
+    return `<li>${coloredUsername(p)}${isSharer ? ' <span class="sharer-badge" aria-label="Now playing">\u25B6</span>' : ''}</li>`;
   }).join('');
 }
 
 function updateQueueList() {
   const container = document.getElementById('queue-section');
   if (!container) return;
+  if (dragState) return; // don't re-render during local drag
   const queue = window.__queue || [];
   if (queue.length === 0) {
     container.innerHTML = '<h3>Queue</h3><p class="queue-empty">No tracks queued.</p>';
@@ -216,16 +272,208 @@ function updateQueueList() {
   const nowPlaying = queue[0];
   const upNext = queue.slice(1);
   let html = '<h3>Queue</h3><ul id="queue-list" class="queue-list">';
-  html += `<li class="queue-item queue-item-now"><span class="queue-label">Now playing</span> ${escapeHtml(nowPlaying.username)}: ${shortUrl(nowPlaying.url)}</li>`;
-  if (upNext.length > 0) {
-    html += `<li class="queue-item queue-item-next"><span class="queue-label">Next</span> ${escapeHtml(upNext[0].username)}: ${shortUrl(upNext[0].url)}</li>`;
-    upNext.slice(1).forEach((item, i) => {
-      html += `<li class="queue-item">${escapeHtml(item.username)}: ${shortUrl(item.url)}</li>`;
-    });
-  }
+  html += `<li class="queue-item queue-item-now" data-index="0"><span class="queue-label">Now playing</span> ${coloredUsername(nowPlaying.username)}: <strong>${escapeHtml(nowPlaying.name || trackName(nowPlaying.url))}</strong></li>`;
+  upNext.forEach((item, i) => {
+    const idx = i + 1;
+    const label = i === 0 ? '<span class="queue-label">Next</span> ' : '';
+    const cls = i === 0 ? 'queue-item queue-item-next queue-item-draggable' : 'queue-item queue-item-draggable';
+    html += `<li class="${cls}" data-index="${idx}"><span class="drag-handle" title="Drag to reorder">\u2630</span>${label}${coloredUsername(item.username)}: ${escapeHtml(item.name || trackName(item.url))}</li>`;
+  });
   html += '</ul>';
   container.innerHTML = html;
+  bindQueueDragHandlers();
 }
+
+// ─── Drag-and-drop queue reordering ───
+
+let dragState = null;
+
+function bindQueueDragHandlers() {
+  const list = document.getElementById('queue-list');
+  if (!list) return;
+  list.querySelectorAll('.queue-item-draggable').forEach(item => {
+    item.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      if (!e.target.closest('.drag-handle')) return;
+      e.preventDefault();
+      startDrag(item, e);
+    });
+  });
+}
+
+function startDrag(item, startEvent) {
+  const list = document.getElementById('queue-list');
+  if (!list) return;
+  const fromIndex = parseInt(item.dataset.index, 10);
+  if (fromIndex < 1) return;
+
+  const allItems = [...list.querySelectorAll('.queue-item-draggable')];
+  const rects = new Map();
+  allItems.forEach(el => {
+    rects.set(parseInt(el.dataset.index, 10), el.getBoundingClientRect());
+  });
+  const itemRect = item.getBoundingClientRect();
+  const itemH = itemRect.height;
+
+  const ghost = item.cloneNode(true);
+  ghost.classList.add('queue-item-ghost');
+  ghost.style.width = itemRect.width + 'px';
+  ghost.style.position = 'fixed';
+  ghost.style.left = itemRect.left + 'px';
+  ghost.style.top = itemRect.top + 'px';
+  ghost.style.zIndex = '1000';
+  ghost.style.pointerEvents = 'none';
+  document.body.appendChild(ghost);
+
+  item.classList.add('queue-item-dragging');
+  allItems.forEach(el => el.style.transition = 'transform 150ms ease');
+
+  dragState = {
+    fromIndex,
+    currentHover: fromIndex,
+    ghost,
+    item,
+    allItems,
+    rects,
+    itemH,
+    offsetY: startEvent.clientY - itemRect.top,
+  };
+
+  let lastEmit = 0;
+  const THROTTLE = 60;
+
+  const onMove = (e) => {
+    if (!dragState) return;
+    dragState.ghost.style.top = (e.clientY - dragState.offsetY) + 'px';
+
+    let hoverIndex = dragState.fromIndex;
+    for (const el of dragState.allItems) {
+      const idx = parseInt(el.dataset.index, 10);
+      if (idx === dragState.fromIndex) continue;
+      const r = dragState.rects.get(idx);
+      if (!r) continue;
+      const midY = r.top + r.height / 2;
+      if (e.clientY < midY && idx < hoverIndex) hoverIndex = idx;
+      if (e.clientY > midY && idx > hoverIndex) hoverIndex = idx;
+    }
+
+    // More robust: find closest gap
+    const indices = dragState.allItems
+      .map(el => parseInt(el.dataset.index, 10))
+      .filter(i => i !== dragState.fromIndex)
+      .sort((a, b) => a - b);
+    let bestIdx = dragState.fromIndex;
+    let bestDist = Infinity;
+    for (const idx of indices) {
+      const r = dragState.rects.get(idx);
+      if (!r) continue;
+      const midY = r.top + r.height / 2;
+      const dist = Math.abs(e.clientY - midY);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = idx;
+        if (e.clientY > midY) bestIdx = idx;
+      }
+    }
+    // Determine insertion point
+    const targetR = dragState.rects.get(bestIdx);
+    if (targetR) {
+      const midY = targetR.top + targetR.height / 2;
+      if (e.clientY < midY && bestIdx < dragState.fromIndex) hoverIndex = bestIdx;
+      else if (e.clientY >= midY && bestIdx > dragState.fromIndex) hoverIndex = bestIdx;
+      else if (e.clientY < midY && bestIdx > dragState.fromIndex) hoverIndex = bestIdx;
+      else if (e.clientY >= midY && bestIdx < dragState.fromIndex) hoverIndex = bestIdx;
+      else hoverIndex = bestIdx;
+    }
+    hoverIndex = Math.max(1, hoverIndex);
+
+    if (hoverIndex !== dragState.currentHover) {
+      dragState.currentHover = hoverIndex;
+      applyDragTransforms(dragState.fromIndex, hoverIndex);
+      const now = Date.now();
+      if (now - lastEmit > THROTTLE && socket && joined) {
+        lastEmit = now;
+        socket.emit('queue_drag', { fromIndex: dragState.fromIndex, hoverIndex });
+      }
+    }
+  };
+
+  const onUp = () => {
+    if (!dragState) return;
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+
+    const { fromIndex: f, currentHover: t, ghost: g, item: it, allItems: all } = dragState;
+    g.remove();
+    it.classList.remove('queue-item-dragging');
+    all.forEach(el => { el.style.transform = ''; el.style.transition = ''; });
+    dragState = null;
+
+    if (socket && joined) socket.emit('queue_drag_end');
+    if (f !== t && socket && joined) {
+      socket.emit('queue_reorder', { fromIndex: f, toIndex: t });
+    }
+  };
+
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+}
+
+function applyDragTransforms(fromIndex, hoverIndex) {
+  if (!dragState) return;
+  const { allItems, itemH } = dragState;
+  allItems.forEach(el => {
+    const idx = parseInt(el.dataset.index, 10);
+    if (idx === fromIndex) return;
+    let shift = 0;
+    if (fromIndex < hoverIndex) {
+      if (idx > fromIndex && idx <= hoverIndex) shift = -itemH;
+    } else {
+      if (idx >= hoverIndex && idx < fromIndex) shift = itemH;
+    }
+    el.style.transform = shift ? `translateY(${shift}px)` : '';
+  });
+}
+
+function applyRemoteDragPreview(data) {
+  const { fromIndex, hoverIndex } = data;
+  const list = document.getElementById('queue-list');
+  if (!list) return;
+  const items = list.querySelectorAll('.queue-item-draggable');
+  if (items.length === 0) return;
+  const itemH = items[0].getBoundingClientRect().height;
+  items.forEach(el => {
+    const idx = parseInt(el.dataset.index, 10);
+    el.style.transition = 'transform 150ms ease';
+    if (idx === fromIndex) {
+      el.classList.add('queue-item-remote-dragging');
+      let targetShift = 0;
+      if (hoverIndex > fromIndex) targetShift = (hoverIndex - fromIndex) * itemH;
+      else if (hoverIndex < fromIndex) targetShift = (hoverIndex - fromIndex) * itemH;
+      el.style.transform = targetShift ? `translateY(${targetShift}px)` : '';
+    } else {
+      let shift = 0;
+      if (fromIndex < hoverIndex) {
+        if (idx > fromIndex && idx <= hoverIndex) shift = -itemH;
+      } else {
+        if (idx >= hoverIndex && idx < fromIndex) shift = itemH;
+      }
+      el.style.transform = shift ? `translateY(${shift}px)` : '';
+    }
+  });
+}
+
+function clearRemoteDragPreview() {
+  const list = document.getElementById('queue-list');
+  if (!list) return;
+  list.querySelectorAll('.queue-item-draggable').forEach(el => {
+    el.classList.remove('queue-item-remote-dragging');
+    el.style.transform = '';
+    el.style.transition = '';
+  });
+}
+
+// ─── Lobby layout ───
 
 function renderLobby() {
   app.innerHTML = `
@@ -241,7 +489,7 @@ function renderLobby() {
       <h2>Queue audio</h2>
       <p>Paste a SoundCloud link, a shared Google Drive file link, or a direct URL to an audio file (mp3, wav, etc.).</p>
       <div class="url-row">
-        <input type="url" id="audio-url" placeholder="SoundCloud, Google Drive, or direct audio URL (mp3, wav…)" />
+        <input type="url" id="audio-url" placeholder="SoundCloud, Google Drive, or direct audio URL (mp3, wav\u2026)" />
         <button type="button" id="btn-queue">Queue</button>
         <button type="button" id="btn-skip" class="btn-skip" title="Skip current track" hidden>Skip</button>
       </div>
@@ -278,12 +526,6 @@ function updateSkipButtonVisibility() {
   btn.hidden = !(isSharer && isPlaying);
 }
 
-function escapeHtml(s) {
-  const div = document.createElement('div');
-  div.textContent = s;
-  return div.innerHTML;
-}
-
 function applyVolume(valuePercent) {
   const v = Math.max(0, Math.min(100, valuePercent)) / 100;
   const audio = document.getElementById('html-audio');
@@ -301,7 +543,6 @@ function bindPlayerHandlers() {
   if (btnSkip) {
     btnSkip.addEventListener('click', () => {
       if (!socket || !joined || username !== window.__currentSharer) return;
-      console.log('[SKIP] → emitting track_ended');
       stopPlayback();
       setPlayingState(false);
       if (window.__scSeekInterval) {
@@ -322,11 +563,9 @@ function bindPlayerHandlers() {
     });
     audio.addEventListener('timeupdate', () => updateSeekBar(audio));
     audio.addEventListener('ended', () => {
-      console.log('[AUDIO ended] currentTrack=', window.__currentTrack?.type, 'sharer=', window.__currentSharer, 'me=', username);
       updateSeekBar(audio);
       setPlayingState(false);
       if (socket && joined && username === window.__currentSharer && window.__currentTrack?.type === 'file') {
-        console.log('[AUDIO ended] → emitting track_ended');
         socket.emit('track_ended');
       }
     });
@@ -363,6 +602,7 @@ function stopPlayback() {
 function handlePlay(url) {
   if (!url) return;
   if (!socket || !joined) return;
+  const name = trackName(url);
   let type;
   if (isSoundCloudUrl(url)) {
     type = 'soundcloud';
@@ -372,8 +612,7 @@ function handlePlay(url) {
   } else {
     type = 'file';
   }
-  console.log('[CLIENT emit play]', type, url.slice(-30));
-  socket.emit('play', { type, url, positionMs: 0 });
+  socket.emit('play', { type, url, positionMs: 0, name });
 }
 
 function isSoundCloudUrl(url) {
@@ -397,12 +636,6 @@ function isGoogleDriveUrl(url) {
 function getGoogleDriveFileId(shareUrl) {
   const match = shareUrl.match(/\/file\/d\/([^/]+)/);
   return match ? match[1] : null;
-}
-
-function getGoogleDriveDirectUrl(shareUrl) {
-  const id = getGoogleDriveFileId(shareUrl);
-  if (!id) return shareUrl;
-  return `https://drive.google.com/uc?export=download&id=${id}`;
 }
 
 function getGoogleDriveProxyUrl(shareUrl) {
@@ -430,14 +663,12 @@ function initSoundCloudWidget() {
     try {
       window.__scWidget = SC.Widget(iframe);
       window.__scWidget.bind(window.SC.Widget.Events.FINISH, () => {
-        console.log('[SC FINISH] currentTrack=', window.__currentTrack?.type, 'sharer=', window.__currentSharer, 'me=', username);
         setPlayingState(false);
         if (window.__scSeekInterval) {
           clearInterval(window.__scSeekInterval);
           window.__scSeekInterval = null;
         }
         if (socket && joined && username === window.__currentSharer && window.__currentTrack?.type === 'soundcloud') {
-          console.log('[SC FINISH] → emitting track_ended');
           socket.emit('track_ended');
         }
       });
