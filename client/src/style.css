@@ -831,6 +831,29 @@ body {
   overflow: hidden;
 }
 
+/* ─── Emoji explosion ─── */
+
+.emoji-particle {
+  position: fixed;
+  font-size: 1.6rem;
+  pointer-events: none;
+  z-index: 10000;
+  animation: emoji-burst 0.9s ease-out forwards;
+  will-change: transform, opacity;
+  transform-origin: center center;
+}
+
+@keyframes emoji-burst {
+  0% {
+    transform: translate(0, 0) scale(var(--scale, 1)) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(var(--dx, 0), var(--dy, -60px)) scale(calc(var(--scale, 1) * 0.25)) rotate(180deg);
+    opacity: 0;
+  }
+}
+
 /* ─── Toast notifications ─── */
 
 .toast-container {

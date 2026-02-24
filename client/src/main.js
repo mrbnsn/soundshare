@@ -76,6 +76,44 @@ function showToast(message, type = 'info', duration = 3000) {
   }, duration);
 }
 
+function showToastHtml(html, type = 'info', duration = 3000) {
+  const container = ensureToastContainer();
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = html;
+  container.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('toast-visible'));
+  setTimeout(() => {
+    toast.classList.remove('toast-visible');
+    toast.addEventListener('transitionend', () => toast.remove(), { once: true });
+    setTimeout(() => toast.remove(), 500);
+  }, duration);
+}
+
+// ─── Emoji explosion ───
+
+function emojiExplosion(emoji, originEl) {
+  const rect = originEl ? originEl.getBoundingClientRect() : { left: window.innerWidth / 2, top: window.innerHeight / 2 };
+  const cx = rect.left + (rect.width || 0) / 2;
+  const cy = rect.top + (rect.height || 0) / 2;
+  const count = 12;
+  for (let i = 0; i < count; i++) {
+    const particle = document.createElement('span');
+    particle.className = 'emoji-particle';
+    particle.textContent = emoji;
+    particle.style.left = cx + 'px';
+    particle.style.top = cy + 'px';
+    const angle = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.5;
+    const dist = 100 + Math.random() * 180;
+    particle.style.setProperty('--dx', Math.cos(angle) * dist + 'px');
+    particle.style.setProperty('--dy', Math.sin(angle) * dist - 40 + 'px');
+    particle.style.setProperty('--scale', 0.5 + Math.random() * 1.1);
+    particle.style.animationDelay = (Math.random() * 0.1) + 's';
+    document.body.appendChild(particle);
+    particle.addEventListener('animationend', () => particle.remove(), { once: true });
+  }
+}
+
 // ─── URL type detection ───
 
 function detectUrlType(url) {
@@ -139,9 +177,17 @@ function updateChatBadge() {
   }
 }
 
+function isChatVisible() {
+  const section = document.getElementById('chat-section');
+  if (!section) return false;
+  const rect = section.getBoundingClientRect();
+  return rect.top < window.innerHeight && rect.bottom > 0;
+}
+
 function isChatScrolledToBottom() {
   const el = document.getElementById('chat-messages');
   if (!el) return true;
+  if (!isChatVisible()) return false;
   return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
 }
 
@@ -1163,18 +1209,26 @@ function renderChatHistory() {
 function appendChatMessage(entry, scroll = true) {
   const container = document.getElementById('chat-messages');
   if (!container) return;
+  const isOther = entry.username !== username;
 
   const div = document.createElement('div');
 
   if (entry.type === 'system') {
     div.className = 'chat-msg chat-system';
     div.innerHTML = `${coloredUsername(entry.username)} ${escapeHtml(entry.message)}`;
+    if (scroll && isOther) {
+      showToastHtml(`${coloredUsername(entry.username)} ${escapeHtml(entry.message)}`, 'info', 3000);
+    }
   } else if (entry.type === 'reaction') {
     div.className = 'chat-msg chat-reaction';
     div.innerHTML = `${coloredUsername(entry.username)} ${escapeHtml(entry.message)}`;
+    if (scroll) emojiExplosion(entry.message, null);
   } else {
     div.className = 'chat-msg';
     div.innerHTML = `<span class="chat-author">${coloredUsername(entry.username)}</span> ${escapeHtml(entry.message)}`;
+    if (scroll && isOther) {
+      showToastHtml(`${coloredUsername(entry.username)} ${escapeHtml(entry.message)}`, 'info', 4000);
+    }
   }
   container.appendChild(div);
 
@@ -1227,6 +1281,7 @@ function bindChatHandlers() {
   document.querySelectorAll('.reaction-btn').forEach(b => {
     b.addEventListener('click', () => {
       if (!socket || !joined) return;
+      emojiExplosion(b.dataset.emoji, b);
       socket.emit('chat_message', { message: b.dataset.emoji, type: 'reaction' });
     });
   });
