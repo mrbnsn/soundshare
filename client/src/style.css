@@ -193,6 +193,25 @@ body {
   white-space: nowrap;
 }
 
+.volume-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.volume-row label {
+  font-size: 0.9rem;
+  color: #888;
+}
+
+.volume-row input[type="range"] {
+  flex: 1;
+  min-width: 4rem;
+  max-width: 8rem;
+  accent-color: #4a7c59;
+}
+
 .soundcloud-container {
   position: absolute;
   left: -9999px;

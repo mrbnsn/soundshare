@@ -121,6 +121,8 @@ function applySoundCloudPlay(widget, { url, positionMs, atTimestamp }) {
   widget.load(url, { callback: () => {
     scheduleAt(atTimestamp || Date.now(), () => {
       widget.seekTo(positionMs || 0);
+      const vol = Number(document.getElementById('volume-slider')?.value ?? 100);
+      if (window.__scWidget) window.__scWidget.setVolume(Math.round(vol));
       widget.play();
       setPlayingState(true);
       startSoundCloudSeekUpdates(widget);
@@ -217,6 +219,10 @@ function renderLobby() {
         <input type="range" id="seek-bar" min="0" max="100" value="0" />
         <span id="seek-time">0:00 / 0:00</span>
       </div>
+      <div class="volume-row">
+        <label for="volume-slider">Volume</label>
+        <input type="range" id="volume-slider" min="0" max="100" value="100" />
+      </div>
     </section>
     <audio id="html-audio" preload="auto"></audio>
     <div id="soundcloud-container" class="soundcloud-container" hidden></div>
@@ -224,6 +230,7 @@ function renderLobby() {
   updateParticipantsList();
   bindPlayerHandlers();
   initSoundCloudWidget();
+  applyVolume(100);
 }
 
 function escapeHtml(s) {
@@ -232,15 +239,22 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+function applyVolume(valuePercent) {
+  const v = Math.max(0, Math.min(100, valuePercent)) / 100;
+  const audio = document.getElementById('html-audio');
+  if (audio) audio.volume = v;
+  if (window.__scWidget) window.__scWidget.setVolume(Math.round(valuePercent));
+}
+
 function bindPlayerHandlers() {
+  const btnPlayPause = document.getElementById('btn-play-pause');
   const urlInput = document.getElementById('audio-url');
-  document.getElementById('btn-play-pause').addEventListener('click', () => {
-    if (window.__isPlaying) {
-      handlePause();
-    } else {
-      handlePlayOrResume(urlInput.value.trim());
-    }
-  });
+  if (btnPlayPause && urlInput) {
+    btnPlayPause.addEventListener('click', () => {
+      if (window.__isPlaying) handlePause();
+      else handlePlayOrResume(urlInput.value.trim());
+    });
+  }
   const seekBar = document.getElementById('seek-bar');
   const seekRow = document.getElementById('seek-row');
   const audio = document.getElementById('html-audio');
@@ -260,14 +274,17 @@ function bindPlayerHandlers() {
     seekBar.addEventListener('input', () => {
       const positionMs = (seekBar.value / 100) * (window.__durationMs || 0);
       localSeek(positionMs);
-      if (socket && joined && username === window.__currentSharer) {
-        socket.emit('seek', { positionMs });
-      }
+      if (socket && joined && username === window.__currentSharer) socket.emit('seek', { positionMs });
     });
   }
-  window.__seekBar = seekBar;
-  window.__seekRow = seekRow;
-  window.__seekTimeEl = document.getElementById('seek-time');
+  window.__seekBar = seekBar || window.__seekBar;
+  window.__seekRow = seekRow || window.__seekRow;
+  window.__seekTimeEl = document.getElementById('seek-time') || window.__seekTimeEl;
+
+  const volumeSlider = document.getElementById('volume-slider');
+  if (volumeSlider) {
+    volumeSlider.addEventListener('input', () => applyVolume(Number(volumeSlider.value)));
+  }
 }
 
 function localSeek(positionMs) {
@@ -333,9 +350,7 @@ function handlePause() {
   if (!socket || !joined) return;
   localPause();
   setPlayingState(false);
-  if (username === window.__currentSharer) {
-    socket.emit('pause');
-  }
+  if (username === window.__currentSharer) socket.emit('pause');
 }
 
 function localPause() {
@@ -414,5 +429,4 @@ function initSoundCloudWidget() {
   }
 }
 
-socket?.emit('participants'); // no-op if not connected
 renderJoin();
